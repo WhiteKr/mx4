@@ -69,6 +69,20 @@ DEFAULT_CONFIG = {
         "waveform": "HAPPY_ALERT",
         "cooldown_s": 2,
     },
+    "workspace_switch": {
+        "enabled": True,
+        "waveform": "SUBTLE_COLLISION",
+    },
+    "window_snap": {
+        "enabled": True,
+        "waveform": "SUBTLE_COLLISION",
+        "debounce_ms": 300,
+    },
+    "focus_change": {
+        "enabled": True,
+        "waveform": "SUBTLE_COLLISION",
+        "cooldown_s": 0.3,
+    },
 }
 
 
@@ -259,6 +273,95 @@ class NotificationListener:
 
 
 # ---------------------------------------------------------------------------
+# Workspace switch detector
+# ---------------------------------------------------------------------------
+
+class WorkspaceSwitchDetector:
+    """Triggers haptic feedback on GNOME workspace changes."""
+
+    def __init__(self, sender, waveform):
+        self.sender = sender
+        self.waveform = waveform
+
+    def setup(self, bus):
+        bus.add_signal_receiver(
+            self._on_workspace_switched,
+            signal_name="WorkspaceSwitched",
+            dbus_interface="com.mx4haptic.CursorTracker",
+            path="/com/mx4haptic/CursorTracker",
+        )
+        log.info("Workspace switch detector listening on D-Bus")
+
+    def _on_workspace_switched(self, from_idx, to_idx):
+        log.info("Workspace switched: %d → %d", from_idx, to_idx)
+        self.sender.play(self.waveform)
+
+
+# ---------------------------------------------------------------------------
+# Window snap detector
+# ---------------------------------------------------------------------------
+
+class WindowSnapDetector:
+    """Triggers haptic feedback when a window is snapped/tiled."""
+
+    def __init__(self, sender, waveform, debounce_s):
+        self.sender = sender
+        self.waveform = waveform
+        self.debounce_s = debounce_s
+        self._last_trigger = 0.0
+
+    def setup(self, bus):
+        bus.add_signal_receiver(
+            self._on_window_snapped,
+            signal_name="WindowSnapped",
+            dbus_interface="com.mx4haptic.CursorTracker",
+            path="/com/mx4haptic/CursorTracker",
+        )
+        log.info("Window snap detector listening on D-Bus (debounce=%dms)",
+                 self.debounce_s * 1000)
+
+    def _on_window_snapped(self, snap_type, monitor_idx):
+        now = time.monotonic()
+        if now - self._last_trigger < self.debounce_s:
+            return
+        log.info("Window snapped: %s (monitor %d)", snap_type, monitor_idx)
+        self.sender.play(self.waveform)
+        self._last_trigger = now
+
+
+# ---------------------------------------------------------------------------
+# Focus change detector
+# ---------------------------------------------------------------------------
+
+class FocusChangeDetector:
+    """Triggers subtle haptic feedback on window focus changes."""
+
+    def __init__(self, sender, waveform, cooldown_s):
+        self.sender = sender
+        self.waveform = waveform
+        self.cooldown_s = cooldown_s
+        self._last_trigger = 0.0
+
+    def setup(self, bus):
+        bus.add_signal_receiver(
+            self._on_focus_changed,
+            signal_name="FocusChanged",
+            dbus_interface="com.mx4haptic.CursorTracker",
+            path="/com/mx4haptic/CursorTracker",
+        )
+        log.info("Focus change detector listening on D-Bus (cooldown=%.1fs)",
+                 self.cooldown_s)
+
+    def _on_focus_changed(self, window_name):
+        now = time.monotonic()
+        if now - self._last_trigger < self.cooldown_s:
+            return
+        log.info("Focus changed: %s", window_name)
+        self.sender.play(self.waveform)
+        self._last_trigger = now
+
+
+# ---------------------------------------------------------------------------
 # Test mode
 # ---------------------------------------------------------------------------
 
@@ -335,6 +438,35 @@ def main():
             cooldown_s=ncfg["cooldown_s"],
         )
         notif_listener.setup(bus)
+
+    # Workspace switch detector
+    wscfg = cfg["workspace_switch"]
+    if wscfg["enabled"]:
+        ws_detector = WorkspaceSwitchDetector(
+            sender=sender,
+            waveform=wscfg["waveform"],
+        )
+        ws_detector.setup(bus)
+
+    # Window snap detector
+    sncfg = cfg["window_snap"]
+    if sncfg["enabled"]:
+        snap_detector = WindowSnapDetector(
+            sender=sender,
+            waveform=sncfg["waveform"],
+            debounce_s=sncfg["debounce_ms"] / 1000.0,
+        )
+        snap_detector.setup(bus)
+
+    # Focus change detector
+    fccfg = cfg["focus_change"]
+    if fccfg["enabled"]:
+        focus_detector = FocusChangeDetector(
+            sender=sender,
+            waveform=fccfg["waveform"],
+            cooldown_s=fccfg["cooldown_s"],
+        )
+        focus_detector.setup(bus)
 
     # Signal handlers
     def on_shutdown(signum, frame):

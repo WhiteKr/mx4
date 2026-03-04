@@ -12,3 +12,17 @@ notifications:
   enabled: true
   waveform: HAPPY_ALERT
   cooldown_s: 2
+
+workspace_switch:
+  enabled: true
+  waveform: SUBTLE_COLLISION
+
+window_snap:
+  enabled: true
+  waveform: SUBTLE_COLLISION
+  debounce_ms: 300
+
+focus_change:
+  enabled: true
+  waveform: SUBTLE_COLLISION
+  cooldown_s: 0.3
