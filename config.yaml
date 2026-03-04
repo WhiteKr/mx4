@@ -1,0 +1,14 @@
+device_path: /dev/hidraw4
+feature_index: 11
+device_number: 0xFF
+
+display_boundary:
+  enabled: true
+  waveform: SUBTLE_COLLISION
+  poll_interval_ms: 50
+  debounce_ms: 100
+
+notifications:
+  enabled: true
+  waveform: HAPPY_ALERT
+  cooldown_s: 2

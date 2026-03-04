@@ -1,0 +1,12 @@
+[Unit]
+Description=MX Master 4 Haptic Feedback Daemon
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/mx4-haptic-daemon
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target

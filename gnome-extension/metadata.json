@@ -1,0 +1,7 @@
+{
+  "uuid": "mx4-cursor-tracker@local",
+  "name": "MX4 Cursor Tracker",
+  "description": "Emits D-Bus signal when cursor crosses monitor boundaries",
+  "shell-version": ["46"],
+  "version": 1
+}

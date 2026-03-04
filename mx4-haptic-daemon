@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""MX Master 4 Haptic Feedback Daemon for Linux.
+
+Sends HID++2.0 haptic commands directly to /dev/hidraw for near-instant response.
+Triggers: display boundary crossing, desktop notifications.
+"""
+
+import argparse
+import copy
+import glob
+import logging
+import os
+import signal
+import struct
+import threading
+import time
+
+import dbus
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+import yaml
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+HIDPP_LONG_REPORT_ID = 0x11
+HIDPP_LONG_MSG_SIZE = 20  # 1 report_id + 1 device + 18 data
+
+WAVEFORMS = {
+    "SHARP_STATE_CHANGE": 0x00,
+    "DAMP_STATE_CHANGE": 0x01,
+    "SHARP_COLLISION": 0x02,
+    "DAMP_COLLISION": 0x03,
+    "SUBTLE_COLLISION": 0x04,
+    "HAPPY_ALERT": 0x05,
+    "ANGRY_ALERT": 0x06,
+    "COMPLETED": 0x07,
+    "SQUARE": 0x08,
+    "WAVE": 0x09,
+    "FIREWORK": 0x0A,
+    "MAD": 0x0B,
+    "KNOCK": 0x0C,
+    "JINGLE": 0x0D,
+    "RINGING": 0x0E,
+    "WHISPER_COLLISION": 0x1B,
+}
+
+CONFIG_PATH = os.path.expanduser("~/.config/mx4-haptic/config.yaml")
+
+log = logging.getLogger("mx4-haptic")
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_CONFIG = {
+    "device_path": "/dev/hidraw4",
+    "feature_index": 11,
+    "device_number": 0xFF,
+    "display_boundary": {
+        "enabled": True,
+        "waveform": "SUBTLE_COLLISION",
+        "poll_interval_ms": 50,
+        "debounce_ms": 500,
+    },
+    "notifications": {
+        "enabled": True,
+        "waveform": "HAPPY_ALERT",
+        "cooldown_s": 2,
+    },
+}
+
+
+def load_config(config_path=CONFIG_PATH):
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    try:
+        with open(config_path) as f:
+            user = yaml.safe_load(f)
+        if user:
+            for k, v in user.items():
+                if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+                    cfg[k] = {**cfg[k], **v}
+                else:
+                    cfg[k] = v
+    except FileNotFoundError:
+        log.info("No config file at %s, using defaults", config_path)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# HapticSender — direct HID++ write to /dev/hidraw
+# ---------------------------------------------------------------------------
+
+class HapticSender:
+    """Sends HID++2.0 haptic waveform commands via /dev/hidraw."""
+
+    FN_BYTE = 0x41  # (WRITE_FNID & 0xF0) | (SW_ID & 0x0F) = 0x40 | 0x01
+
+    def __init__(self, device_path, feature_index, device_number):
+        self.device_path = device_path
+        self.feature_index = feature_index
+        self.device_number = device_number
+        self._fd = None
+        self._lock = threading.Lock()
+
+    def open(self):
+        """Open the hidraw device."""
+        self.close()
+        fd = os.open(self.device_path, os.O_RDWR)
+        self._fd = fd
+        log.info("Opened %s (fd=%d)", self.device_path, fd)
+
+    def close(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    def _build_packet(self, waveform_index):
+        """Build a 20-byte HID++ long message for haptic play.
+
+        Packet layout:
+          [0] 0x11           — long report id
+          [1] device_number  — 0xFF for BT direct
+          [2] feature_index  — HAPTIC feature index on device
+          [3] fn_id | sw_id  — function 4 << 4 | software_id
+          [4] waveform       — waveform index byte
+          [5..19] 0x00       — padding
+        """
+        data = struct.pack("BBB", self.feature_index, self.FN_BYTE, waveform_index)
+        # Pad data to 18 bytes (the data portion of the long message)
+        data = data.ljust(18, b"\x00")
+        return struct.pack("!BB18s", HIDPP_LONG_REPORT_ID, self.device_number, data)
+
+    def play(self, waveform_name):
+        """Send a haptic waveform by name. Returns True on success."""
+        wf = WAVEFORMS.get(waveform_name)
+        if wf is None:
+            log.error("Unknown waveform: %s", waveform_name)
+            return False
+        return self.play_index(wf)
+
+    def play_index(self, waveform_index):
+        """Send a haptic waveform by numeric index. Returns True on success."""
+        pkt = self._build_packet(waveform_index)
+        with self._lock:
+            for attempt in range(2):
+                try:
+                    if self._fd is None:
+                        self._reconnect()
+                    os.write(self._fd, pkt)
+                    log.debug("Sent waveform 0x%02X", waveform_index)
+                    return True
+                except OSError as e:
+                    if attempt == 0:
+                        log.warning("Write failed (%s), attempting reconnect", e)
+                        self._reconnect()
+                    else:
+                        log.error("Write failed after reconnect: %s", e)
+            return False
+
+    def _reconnect(self):
+        """Try to re-open the configured path, or scan for the device."""
+        self.close()
+        # First try the configured path
+        try:
+            self.open()
+            return
+        except OSError:
+            pass
+        # Scan /dev/hidraw* for Logitech MX Master 4
+        log.info("Scanning /dev/hidraw* for MX Master 4...")
+        for path in sorted(glob.glob("/dev/hidraw*")):
+            try:
+                self.device_path = path
+                self.open()
+                log.info("Reconnected via %s", path)
+                return
+            except OSError:
+                continue
+        log.error("Could not find MX Master 4 on any hidraw device")
+
+
+# ---------------------------------------------------------------------------
+# Display boundary detector — listens to GNOME Shell extension D-Bus signal
+# ---------------------------------------------------------------------------
+
+class DisplayBoundaryDetector:
+    """Listens for BoundaryCrossed signals from mx4-cursor-tracker GNOME extension."""
+
+    def __init__(self, sender, waveform, debounce_s):
+        self.sender = sender
+        self.waveform = waveform
+        self.debounce_s = debounce_s
+        self._last_trigger = 0.0
+
+    def setup(self, bus):
+        """Subscribe to BoundaryCrossed D-Bus signal from the GNOME extension."""
+        bus.add_signal_receiver(
+            self._on_boundary_crossed,
+            signal_name="BoundaryCrossed",
+            dbus_interface="com.mx4haptic.CursorTracker",
+            path="/com/mx4haptic/CursorTracker",
+        )
+        log.info("Display boundary detector listening on D-Bus (debounce=%dms)",
+                 self.debounce_s * 1000)
+
+    def _on_boundary_crossed(self, from_monitor, to_monitor, x, y):
+        now = time.monotonic()
+        if now - self._last_trigger < self.debounce_s:
+            return
+        log.info("Boundary crossed: monitor %d → %d (x=%d)", from_monitor, to_monitor, x)
+        self.sender.play(self.waveform)
+        self._last_trigger = now
+
+
+# ---------------------------------------------------------------------------
+# Notification listener — D-Bus session bus
+# ---------------------------------------------------------------------------
+
+class NotificationListener:
+    """Listens for desktop notifications via D-Bus and triggers haptic feedback."""
+
+    def __init__(self, sender, waveform, cooldown_s):
+        self.sender = sender
+        self.waveform = waveform
+        self.cooldown_s = cooldown_s
+        self._last_trigger = 0.0
+
+    def setup(self, bus):
+        """Register D-Bus match rule for notifications."""
+        bus.add_match_string(
+            "type='method_call',"
+            "interface='org.freedesktop.Notifications',"
+            "member='Notify',"
+            "eavesdrop=true"
+        )
+        bus.add_message_filter(self._on_message)
+        log.info("Notification listener registered (cooldown=%ds)", self.cooldown_s)
+
+    def _on_message(self, bus, msg):
+        if msg.get_member() != "Notify":
+            return
+        if msg.get_interface() != "org.freedesktop.Notifications":
+            return
+
+        now = time.monotonic()
+        if now - self._last_trigger < self.cooldown_s:
+            return
+
+        args = msg.get_args_list()
+        summary = args[3] if len(args) > 3 else "?"
+        log.info("Notification received: %s", summary)
+        self.sender.play(self.waveform)
+        self._last_trigger = now
+
+
+# ---------------------------------------------------------------------------
+# Test mode
+# ---------------------------------------------------------------------------
+
+def run_test(sender):
+    """Play all known waveforms sequentially."""
+    print("MX Master 4 Haptic Test — playing all waveforms")
+    sender.open()
+    for name, idx in sorted(WAVEFORMS.items(), key=lambda kv: kv[1]):
+        print(f"  [{idx:#04x}] {name}...", end=" ", flush=True)
+        ok = sender.play_index(idx)
+        print("OK" if ok else "FAIL")
+        time.sleep(1.5)
+    sender.close()
+    print("Done.")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="MX Master 4 Haptic Feedback Daemon")
+    parser.add_argument("--test", action="store_true", help="Play all waveforms and exit")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    parser.add_argument("--config", default=CONFIG_PATH, help="Config file path")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    cfg = load_config(args.config)
+
+    dev_num = cfg.get("device_number", 0xFF)
+    if isinstance(dev_num, str):
+        dev_num = int(dev_num, 0)
+
+    sender = HapticSender(
+        device_path=cfg["device_path"],
+        feature_index=cfg["feature_index"],
+        device_number=dev_num,
+    )
+
+    if args.test:
+        run_test(sender)
+        return
+
+    # Open device
+    sender.open()
+
+    # Set up GLib main loop with D-Bus integration
+    DBusGMainLoop(set_as_default=True)
+    loop = GLib.MainLoop()
+    bus = dbus.SessionBus()
+
+    # Display boundary detector (via GNOME Shell extension D-Bus signal)
+    bcfg = cfg["display_boundary"]
+    if bcfg["enabled"]:
+        boundary_detector = DisplayBoundaryDetector(
+            sender=sender,
+            waveform=bcfg["waveform"],
+            debounce_s=bcfg["debounce_ms"] / 1000.0,
+        )
+        boundary_detector.setup(bus)
+
+    # Notification listener
+    ncfg = cfg["notifications"]
+    if ncfg["enabled"]:
+        notif_listener = NotificationListener(
+            sender=sender,
+            waveform=ncfg["waveform"],
+            cooldown_s=ncfg["cooldown_s"],
+        )
+        notif_listener.setup(bus)
+
+    # Signal handlers
+    def on_shutdown(signum, frame):
+        log.info("Received signal %d, shutting down", signum)
+        loop.quit()
+
+    signal.signal(signal.SIGTERM, on_shutdown)
+    signal.signal(signal.SIGINT, on_shutdown)
+
+    log.info("mx4-haptic-daemon started (device=%s)", cfg["device_path"])
+
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        log.info("Shutting down...")
+        sender.close()
+        log.info("Bye.")
+
+
+if __name__ == "__main__":
+    main()
