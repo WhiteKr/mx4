@@ -4,8 +4,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 
 start_system_bus() {
-    mkdir -p /run/dbus
-    pgrep -f 'dbus-daemon --system' >/dev/null || dbus-daemon --system --fork
+    if ! dbus-send --system --dest=org.freedesktop.DBus / org.freedesktop.DBus.Peer.Ping 2>/dev/null; then
+        mkdir -p /run/dbus
+        rm -f /run/dbus/pid
+        dbus-daemon --system --fork
+    fi
 }
 
 # With /run/systemd/seats present, GNOME Shell starts org.freedesktop.login1 and crashes when logind is absent.
@@ -16,8 +19,13 @@ hide_logind_seats() {
     fi
 }
 
+# Services the private bus activates inherit its stdout and can outlive it, which keeps a CI step open.
 rerun_in_private_session() {
-    HOME=$(mktemp -d) timeout 120 dbus-run-session -- "$0" --inside
+    local home status=0
+    home=$(mktemp -d)
+    HOME=$home timeout --kill-after=10 120 dbus-run-session -- "$0" --inside >"$home/run.log" 2>&1 || status=$?
+    grep -v '^dbus-daemon' "$home/run.log"
+    return "$status"
 }
 
 if [ "${1:-}" != "--inside" ]; then
@@ -28,14 +36,15 @@ if [ "${1:-}" != "--inside" ]; then
 fi
 
 W=$HOME
-dump_logs_on_failure() {
+finish() {
     local status=$?
+    pkill -P $$ 2>/dev/null || true
     if [ "$status" -ne 0 ]; then
         echo "--- daemon log"; cat "$W/daemon.log" 2>/dev/null || true
         echo "--- shell log"; tail -n 60 "$W/shell.log" 2>/dev/null || true
     fi
 }
-trap dump_logs_on_failure EXIT
+trap finish EXIT
 export XDG_RUNTIME_DIR=$W/run
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 EXT=$W/.local/share/gnome-shell/extensions
