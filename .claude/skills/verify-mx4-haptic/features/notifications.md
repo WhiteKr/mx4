@@ -5,7 +5,7 @@ When any application shows a desktop notification, the mouse plays `HAPPY_ALERT`
 ## Sub-features
 
 - `notify-fire` one notification sends one `HAPPY_ALERT` (0x05) packet.
-- `notify-cooldown` another notification within `notifications.cooldown_s` (2 s) sends nothing.
+- `notify-cooldown` another notification within `haptic.notifications.cooldown_ms` (2000 ms) sends nothing.
 - `notify-after-cooldown` a notification after the cooldown fires again.
 
 ## How to get to it (user POV)

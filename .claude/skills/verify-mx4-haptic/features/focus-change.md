@@ -5,7 +5,7 @@ When a different window takes focus, the mouse gives a light bump. Focus flappin
 ## Sub-features
 
 - `focus-fire` a focus change sends one `SUBTLE_COLLISION` (0x04) packet.
-- `focus-cooldown` another change within `focus_change.cooldown_s` (0.3 s) sends nothing.
+- `focus-cooldown` another change within `haptic.focus_change.cooldown_ms` (300 ms) sends nothing.
 
 ## How to get to it (user POV)
 

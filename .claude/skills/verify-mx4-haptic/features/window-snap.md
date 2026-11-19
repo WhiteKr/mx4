@@ -5,7 +5,7 @@ When the user tiles a window to the left or right half, or maximizes it, the mou
 ## Sub-features
 
 - `snap-fire` `left`, `right` or `maximize` sends one `SUBTLE_COLLISION` (0x04) packet.
-- `snap-debounce` a second snap within `window_snap.debounce_ms` (300 ms) sends nothing.
+- `snap-cooldown` a second snap within `haptic.window_snap.cooldown_ms` (300 ms) sends nothing.
 
 ## How to get to it (user POV)
 
@@ -25,5 +25,5 @@ Preconditions:
 ## Gotchas
 
 - Snap detection only tracks the focused window and needs a focus change first to start tracking. The harness skips that, so it cannot catch a regression in the extension's tracking logic.
-- The extension also debounces (100 ms) before emitting; the daemon's 300 ms debounce is a second layer. This harness exercises only the daemon's.
+- The extension also debounces (100 ms) before emitting; the daemon's 300 ms cooldown is a second layer. This harness exercises only the daemon's.
 - The daemon logs any string as the snap type; it does not validate `left|right|maximize`.
