@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""MX Master 4 Haptic Feedback Daemon for Linux.
-
-Sends HID++2.0 haptic commands directly to /dev/hidraw for near-instant response.
-Triggers: display boundary crossing, workspace switch, window snap,
-focus change (via the mx4-cursor-tracker GNOME extension), and desktop
-notifications.
-"""
 
 import argparse
 import copy
@@ -18,12 +11,10 @@ import time
 
 import yaml
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 HIDPP_LONG_REPORT_ID = 0x11
-HIDPP_LONG_MSG_SIZE = 20  # 1 report_id + 1 device + 18 data
+HIDPP_LONG_MSG_SIZE = 20
+HAPTIC_PLAY_FN = 4
+SOFTWARE_ID = 1
 
 WAVEFORMS = {
     "SHARP_STATE_CHANGE": 0x00,
@@ -55,10 +46,6 @@ LOGITECH_VENDOR_ID = 0x046D
 TARGET_NAME = "MX Master 4"
 
 log = logging.getLogger("mx4-haptic")
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG = {
     "device_path": "/dev/hidraw4",
@@ -106,10 +93,6 @@ def load_config(config_path=CONFIG_PATH):
         log.info("No config file at %s, using defaults", config_path)
     return cfg
 
-
-# ---------------------------------------------------------------------------
-# HapticSender — direct HID++ write to /dev/hidraw
-# ---------------------------------------------------------------------------
 
 def _report_ids(descriptor):
     """Return the set of Report IDs declared in a HID report descriptor."""
@@ -175,7 +158,7 @@ class HapticSender:
     open, and a scan never falls back to "whatever opens first".
     """
 
-    FN_BYTE = 0x41  # (WRITE_FNID & 0xF0) | (SW_ID & 0x0F) = 0x40 | 0x01
+    FN_BYTE = HAPTIC_PLAY_FN << 4 | SOFTWARE_ID
 
     def __init__(self, device_path, feature_index, device_number):
         self.configured_path = device_path
@@ -277,22 +260,11 @@ class HapticSender:
             self._fd = None
 
     def _build_packet(self, waveform_index):
-        """Build a 20-byte HID++ long message for haptic play.
-
-        Packet layout:
-          [0] 0x11           — long report id
-          [1] device_number  — 0xFF for BT direct
-          [2] feature_index  — HAPTIC feature index on device
-          [3] fn_id | sw_id  — function 4 << 4 | software_id
-          [4] waveform       — waveform index byte
-          [5..19] 0x00       — padding
-        """
         header = bytes([HIDPP_LONG_REPORT_ID, self.device_number, self.feature_index,
                         self.FN_BYTE, waveform_index])
         return header.ljust(HIDPP_LONG_MSG_SIZE, b"\x00")
 
     def play(self, waveform_name):
-        """Send a haptic waveform by name. Returns True on success."""
         wf = WAVEFORMS.get(waveform_name)
         if wf is None:
             log.error("Unknown waveform: %s", waveform_name)
@@ -300,7 +272,6 @@ class HapticSender:
         return self.play_index(wf)
 
     def play_index(self, waveform_index):
-        """Send a haptic waveform by numeric index. Returns True on success."""
         pkt = self._build_packet(waveform_index)
         for attempt in range(2):
             try:
@@ -318,14 +289,9 @@ class HapticSender:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Triggers — D-Bus events that play a waveform
-# ---------------------------------------------------------------------------
-
 EXTENSION_IFACE = "com.mx4haptic.CursorTracker"
 EXTENSION_PATH = "/com/mx4haptic/CursorTracker"
 
-# Config section -> signal emitted by the mx4-cursor-tracker GNOME extension.
 EXTENSION_SIGNALS = {
     "display_boundary": "BoundaryCrossed",
     "workspace_switch": "WorkspaceSwitched",
@@ -335,8 +301,6 @@ EXTENSION_SIGNALS = {
 
 
 class Trigger:
-    """Plays a waveform per event, dropping events inside the throttle window."""
-
     def __init__(self, name, sender, tcfg):
         self.name = name
         self.sender = sender
@@ -354,7 +318,6 @@ class Trigger:
 
 
 def setup_triggers(cfg, sender, bus):
-    """Subscribe every enabled trigger to the session bus."""
     for key, signal_name in EXTENSION_SIGNALS.items():
         if cfg[key]["enabled"]:
             trigger = Trigger(signal_name, sender, cfg[key])
@@ -381,12 +344,7 @@ def setup_triggers(cfg, sender, bus):
              ", ".join(k for k in [*EXTENSION_SIGNALS, "notifications"] if cfg[k]["enabled"]))
 
 
-# ---------------------------------------------------------------------------
-# Test mode
-# ---------------------------------------------------------------------------
-
 def run_test(sender):
-    """Play all known waveforms sequentially."""
     print("MX Master 4 Haptic Test — playing all waveforms")
     for name, idx in sorted(WAVEFORMS.items(), key=lambda kv: kv[1]):
         print(f"  [{idx:#04x}] {name}...", end=" ", flush=True)
@@ -396,10 +354,6 @@ def run_test(sender):
     sender.close()
     print("Done.")
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="MX Master 4 Haptic Feedback Daemon")
@@ -434,13 +388,11 @@ def main():
     from dbus.mainloop.glib import DBusGMainLoop
     from gi.repository import GLib
 
-    # Set up GLib main loop with D-Bus integration
     DBusGMainLoop(set_as_default=True)
     loop = GLib.MainLoop()
     bus = dbus.SessionBus()
     setup_triggers(cfg, sender, bus)
 
-    # Signal handlers
     def on_shutdown(signum, frame):
         log.info("Received signal %d, shutting down", signum)
         loop.quit()

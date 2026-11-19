@@ -1,19 +1,29 @@
 #!/usr/bin/env bash
-# End-to-end check: headless GNOME Shell + the extension + the daemon writing to a fake hidraw node.
-# Runs as root in a throwaway container or CI runner (it starts a system bus and hides
-# /run/systemd/seats so the shell does not wait for logind). Usage: tests/gnome-smoke/run.sh
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 
-if [ "${1:-}" != "--inside" ]; then
+start_system_bus() {
     mkdir -p /run/dbus
     pgrep -f 'dbus-daemon --system' >/dev/null || dbus-daemon --system --fork
+}
+
+# With /run/systemd/seats present, GNOME Shell starts org.freedesktop.login1 and crashes when logind is absent.
+hide_logind_seats() {
     if [ -d /run/systemd/seats ]; then
         mv /run/systemd/seats /run/systemd/seats.off
         trap 'mv /run/systemd/seats.off /run/systemd/seats' EXIT
     fi
+}
+
+rerun_in_private_session() {
     HOME=$(mktemp -d) timeout 120 dbus-run-session -- "$0" --inside
+}
+
+if [ "${1:-}" != "--inside" ]; then
+    start_system_bus
+    hide_logind_seats
+    rerun_in_private_session
     exit
 fi
 
