@@ -17,7 +17,7 @@ Preconditions:
 
 - Baseline from `README.md`; no focus step in the last 0.3 s.
 
-- **Focus another app.** Run `$V focus org.gnome.Nautilus`. Log `Focus changed: org.gnome.Nautilus`, one packet.
+- **Focus another app.** Run `$V focus org.gnome.Nautilus`. Log `FocusChanged: org.gnome.Nautilus`, one packet.
 - **Cooldown.** `Alt+Tab` twice quickly. Run `$V focus firefox --repeat 2 --expect 1`. One packet.
 - **Proof.** Run `$V evidence focus-change`.
 

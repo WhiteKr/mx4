@@ -2,7 +2,9 @@
 """MX Master 4 Haptic Feedback Daemon for Linux.
 
 Sends HID++2.0 haptic commands directly to /dev/hidraw for near-instant response.
-Triggers: display boundary crossing, desktop notifications.
+Triggers: display boundary crossing, workspace switch, window snap,
+focus change (via the mx4-cursor-tracker GNOME extension), and desktop
+notifications.
 """
 
 import argparse
@@ -12,13 +14,8 @@ import logging
 import os
 import signal
 import stat
-import struct
-import threading
 import time
 
-import dbus
-from dbus.mainloop.glib import DBusGMainLoop
-from gi.repository import GLib
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -70,8 +67,7 @@ DEFAULT_CONFIG = {
     "display_boundary": {
         "enabled": True,
         "waveform": "SUBTLE_COLLISION",
-        "poll_interval_ms": 50,
-        "debounce_ms": 500,
+        "debounce_ms": 100,
     },
     "notifications": {
         "enabled": True,
@@ -187,7 +183,6 @@ class HapticSender:
         self.feature_index = feature_index
         self.device_number = device_number
         self._fd = None
-        self._lock = threading.Lock()
 
     # -- device identification ---------------------------------------------
 
@@ -292,10 +287,9 @@ class HapticSender:
           [4] waveform       — waveform index byte
           [5..19] 0x00       — padding
         """
-        data = struct.pack("BBB", self.feature_index, self.FN_BYTE, waveform_index)
-        # Pad data to 18 bytes (the data portion of the long message)
-        data = data.ljust(18, b"\x00")
-        return struct.pack("!BB18s", HIDPP_LONG_REPORT_ID, self.device_number, data)
+        header = bytes([HIDPP_LONG_REPORT_ID, self.device_number, self.feature_index,
+                        self.FN_BYTE, waveform_index])
+        return header.ljust(HIDPP_LONG_MSG_SIZE, b"\x00")
 
     def play(self, waveform_name):
         """Send a haptic waveform by name. Returns True on success."""
@@ -308,184 +302,83 @@ class HapticSender:
     def play_index(self, waveform_index):
         """Send a haptic waveform by numeric index. Returns True on success."""
         pkt = self._build_packet(waveform_index)
-        with self._lock:
-            for attempt in range(2):
-                try:
-                    if self._fd is None:
-                        self.open()
-                    os.write(self._fd, pkt)
-                    log.debug("Sent waveform 0x%02X", waveform_index)
-                    return True
-                except OSError as e:
-                    self.close()
-                    if attempt == 0:
-                        log.warning("Write failed (%s), attempting reconnect", e)
-                    else:
-                        log.error("Write failed after reconnect: %s", e)
-            return False
+        for attempt in range(2):
+            try:
+                if self._fd is None:
+                    self.open()
+                os.write(self._fd, pkt)
+                log.debug("Sent waveform 0x%02X", waveform_index)
+                return True
+            except OSError as e:
+                self.close()
+                if attempt == 0:
+                    log.debug("Write failed (%s), reconnecting", e)
+                else:
+                    log.warning("Haptic not sent: %s", e)
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Display boundary detector — listens to GNOME Shell extension D-Bus signal
+# Triggers — D-Bus events that play a waveform
 # ---------------------------------------------------------------------------
 
-class DisplayBoundaryDetector:
-    """Listens for BoundaryCrossed signals from mx4-cursor-tracker GNOME extension."""
+EXTENSION_IFACE = "com.mx4haptic.CursorTracker"
+EXTENSION_PATH = "/com/mx4haptic/CursorTracker"
 
-    def __init__(self, sender, waveform, debounce_s):
+# Config section -> signal emitted by the mx4-cursor-tracker GNOME extension.
+EXTENSION_SIGNALS = {
+    "display_boundary": "BoundaryCrossed",
+    "workspace_switch": "WorkspaceSwitched",
+    "window_snap": "WindowSnapped",
+    "focus_change": "FocusChanged",
+}
+
+
+class Trigger:
+    """Plays a waveform per event, dropping events inside the throttle window."""
+
+    def __init__(self, name, sender, tcfg):
+        self.name = name
         self.sender = sender
-        self.waveform = waveform
-        self.debounce_s = debounce_s
-        self._last_trigger = 0.0
+        self.waveform = tcfg["waveform"]
+        self.throttle_s = tcfg.get("cooldown_s", tcfg.get("debounce_ms", 0) / 1000.0)
+        self._last = float("-inf")
 
-    def setup(self, bus):
-        """Subscribe to BoundaryCrossed D-Bus signal from the GNOME extension."""
-        bus.add_signal_receiver(
-            self._on_boundary_crossed,
-            signal_name="BoundaryCrossed",
-            dbus_interface="com.mx4haptic.CursorTracker",
-            path="/com/mx4haptic/CursorTracker",
-        )
-        log.info("Display boundary detector listening on D-Bus (debounce=%dms)",
-                 self.debounce_s * 1000)
-
-    def _on_boundary_crossed(self, from_monitor, to_monitor, x, y):
+    def fire(self, *args):
         now = time.monotonic()
-        if now - self._last_trigger < self.debounce_s:
+        if now - self._last < self.throttle_s:
             return
-        log.info("Boundary crossed: monitor %d → %d (x=%d)", from_monitor, to_monitor, x)
+        self._last = now
+        log.info("%s: %s", self.name, ", ".join(map(str, args)))
         self.sender.play(self.waveform)
-        self._last_trigger = now
 
 
-# ---------------------------------------------------------------------------
-# Notification listener — D-Bus session bus
-# ---------------------------------------------------------------------------
+def setup_triggers(cfg, sender, bus):
+    """Subscribe every enabled trigger to the session bus."""
+    for key, signal_name in EXTENSION_SIGNALS.items():
+        if cfg[key]["enabled"]:
+            trigger = Trigger(signal_name, sender, cfg[key])
+            bus.add_signal_receiver(trigger.fire, signal_name=signal_name,
+                                    dbus_interface=EXTENSION_IFACE, path=EXTENSION_PATH)
 
-class NotificationListener:
-    """Listens for desktop notifications via D-Bus and triggers haptic feedback."""
+    if cfg["notifications"]["enabled"]:
+        trigger = Trigger("Notify", sender, cfg["notifications"])
 
-    def __init__(self, sender, waveform, cooldown_s):
-        self.sender = sender
-        self.waveform = waveform
-        self.cooldown_s = cooldown_s
-        self._last_trigger = 0.0
+        def on_message(_bus, msg):
+            if msg.get_interface() == "org.freedesktop.Notifications" and msg.get_member() == "Notify":
+                args = msg.get_args_list()
+                trigger.fire(args[3] if len(args) > 3 else "?")
 
-    def setup(self, bus):
-        """Register D-Bus match rule for notifications."""
         bus.add_match_string(
             "type='method_call',"
             "interface='org.freedesktop.Notifications',"
             "member='Notify',"
             "eavesdrop=true"
         )
-        bus.add_message_filter(self._on_message)
-        log.info("Notification listener registered (cooldown=%ds)", self.cooldown_s)
+        bus.add_message_filter(on_message)
 
-    def _on_message(self, bus, msg):
-        if msg.get_member() != "Notify":
-            return
-        if msg.get_interface() != "org.freedesktop.Notifications":
-            return
-
-        now = time.monotonic()
-        if now - self._last_trigger < self.cooldown_s:
-            return
-
-        args = msg.get_args_list()
-        summary = args[3] if len(args) > 3 else "?"
-        log.info("Notification received: %s", summary)
-        self.sender.play(self.waveform)
-        self._last_trigger = now
-
-
-# ---------------------------------------------------------------------------
-# Workspace switch detector
-# ---------------------------------------------------------------------------
-
-class WorkspaceSwitchDetector:
-    """Triggers haptic feedback on GNOME workspace changes."""
-
-    def __init__(self, sender, waveform):
-        self.sender = sender
-        self.waveform = waveform
-
-    def setup(self, bus):
-        bus.add_signal_receiver(
-            self._on_workspace_switched,
-            signal_name="WorkspaceSwitched",
-            dbus_interface="com.mx4haptic.CursorTracker",
-            path="/com/mx4haptic/CursorTracker",
-        )
-        log.info("Workspace switch detector listening on D-Bus")
-
-    def _on_workspace_switched(self, from_idx, to_idx):
-        log.info("Workspace switched: %d → %d", from_idx, to_idx)
-        self.sender.play(self.waveform)
-
-
-# ---------------------------------------------------------------------------
-# Window snap detector
-# ---------------------------------------------------------------------------
-
-class WindowSnapDetector:
-    """Triggers haptic feedback when a window is snapped/tiled."""
-
-    def __init__(self, sender, waveform, debounce_s):
-        self.sender = sender
-        self.waveform = waveform
-        self.debounce_s = debounce_s
-        self._last_trigger = 0.0
-
-    def setup(self, bus):
-        bus.add_signal_receiver(
-            self._on_window_snapped,
-            signal_name="WindowSnapped",
-            dbus_interface="com.mx4haptic.CursorTracker",
-            path="/com/mx4haptic/CursorTracker",
-        )
-        log.info("Window snap detector listening on D-Bus (debounce=%dms)",
-                 self.debounce_s * 1000)
-
-    def _on_window_snapped(self, snap_type, monitor_idx):
-        now = time.monotonic()
-        if now - self._last_trigger < self.debounce_s:
-            return
-        log.info("Window snapped: %s (monitor %d)", snap_type, monitor_idx)
-        self.sender.play(self.waveform)
-        self._last_trigger = now
-
-
-# ---------------------------------------------------------------------------
-# Focus change detector
-# ---------------------------------------------------------------------------
-
-class FocusChangeDetector:
-    """Triggers subtle haptic feedback on window focus changes."""
-
-    def __init__(self, sender, waveform, cooldown_s):
-        self.sender = sender
-        self.waveform = waveform
-        self.cooldown_s = cooldown_s
-        self._last_trigger = 0.0
-
-    def setup(self, bus):
-        bus.add_signal_receiver(
-            self._on_focus_changed,
-            signal_name="FocusChanged",
-            dbus_interface="com.mx4haptic.CursorTracker",
-            path="/com/mx4haptic/CursorTracker",
-        )
-        log.info("Focus change detector listening on D-Bus (cooldown=%.1fs)",
-                 self.cooldown_s)
-
-    def _on_focus_changed(self, window_name):
-        now = time.monotonic()
-        if now - self._last_trigger < self.cooldown_s:
-            return
-        log.info("Focus changed: %s", window_name)
-        self.sender.play(self.waveform)
-        self._last_trigger = now
+    log.info("Triggers enabled: %s",
+             ", ".join(k for k in [*EXTENSION_SIGNALS, "notifications"] if cfg[k]["enabled"]))
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +388,6 @@ class FocusChangeDetector:
 def run_test(sender):
     """Play all known waveforms sequentially."""
     print("MX Master 4 Haptic Test — playing all waveforms")
-    sender.open()
     for name, idx in sorted(WAVEFORMS.items(), key=lambda kv: kv[1]):
         print(f"  [{idx:#04x}] {name}...", end=" ", flush=True)
         ok = sender.play_index(idx)
@@ -538,62 +430,15 @@ def main():
         run_test(sender)
         return
 
-    # Open device
-    sender.open()
+    import dbus
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib
 
     # Set up GLib main loop with D-Bus integration
     DBusGMainLoop(set_as_default=True)
     loop = GLib.MainLoop()
     bus = dbus.SessionBus()
-
-    # Display boundary detector (via GNOME Shell extension D-Bus signal)
-    bcfg = cfg["display_boundary"]
-    if bcfg["enabled"]:
-        boundary_detector = DisplayBoundaryDetector(
-            sender=sender,
-            waveform=bcfg["waveform"],
-            debounce_s=bcfg["debounce_ms"] / 1000.0,
-        )
-        boundary_detector.setup(bus)
-
-    # Notification listener
-    ncfg = cfg["notifications"]
-    if ncfg["enabled"]:
-        notif_listener = NotificationListener(
-            sender=sender,
-            waveform=ncfg["waveform"],
-            cooldown_s=ncfg["cooldown_s"],
-        )
-        notif_listener.setup(bus)
-
-    # Workspace switch detector
-    wscfg = cfg["workspace_switch"]
-    if wscfg["enabled"]:
-        ws_detector = WorkspaceSwitchDetector(
-            sender=sender,
-            waveform=wscfg["waveform"],
-        )
-        ws_detector.setup(bus)
-
-    # Window snap detector
-    sncfg = cfg["window_snap"]
-    if sncfg["enabled"]:
-        snap_detector = WindowSnapDetector(
-            sender=sender,
-            waveform=sncfg["waveform"],
-            debounce_s=sncfg["debounce_ms"] / 1000.0,
-        )
-        snap_detector.setup(bus)
-
-    # Focus change detector
-    fccfg = cfg["focus_change"]
-    if fccfg["enabled"]:
-        focus_detector = FocusChangeDetector(
-            sender=sender,
-            waveform=fccfg["waveform"],
-            cooldown_s=fccfg["cooldown_s"],
-        )
-        focus_detector.setup(bus)
+    setup_triggers(cfg, sender, bus)
 
     # Signal handlers
     def on_shutdown(signum, frame):

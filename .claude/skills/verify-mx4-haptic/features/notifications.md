@@ -18,7 +18,7 @@ Preconditions:
 
 - Baseline from `README.md`; no notify step in the last 2 s; doctor shows `owns org.freedesktop.Notifications` ok.
 
-- **Notify.** An app posts "Build finished". Run `$V notify "Build finished"`. Log shows `Notification received: Build finished`, one packet `… wave=0x05 HAPPY_ALERT`. `notifyd.log` in the evidence dir has `Notify id=1 … summary=Build finished`.
+- **Notify.** An app posts "Build finished". Run `$V notify "Build finished"`. Log shows `Notify: Build finished`, one packet `… wave=0x05 HAPPY_ALERT`. `notifyd.log` in the evidence dir has `Notify id=1 … summary=Build finished`.
 - **Cooldown.** A second notification right away. Run `$V notify "Second" --expect 0`. No packet, but `notifyd.log` still records `summary=Second` (the call went through; the daemon chose not to buzz).
 - **After cooldown.** Run `sleep 2` then `$V notify "Third"`. One `HAPPY_ALERT` packet.
 - **Proof.** Run `$V evidence notifications`.

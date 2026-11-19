@@ -17,9 +17,9 @@ Preconditions:
 
 - Baseline from `README.md`; no snap step in the last 300 ms.
 
-- **Snap left.** Run `$V snap left 0`. Log `Window snapped: left (monitor 0)`, one packet.
+- **Snap left.** Run `$V snap left 0`. Log `WindowSnapped: left, 0`, one packet.
 - **Debounce.** Run `$V snap right 0 --repeat 2 --expect 1`. One packet.
-- **Maximize.** After the helper's 0.5 s pause, run `$V snap maximize 1`. Log `Window snapped: maximize (monitor 1)`, one packet.
+- **Maximize.** After the helper's 0.5 s pause, run `$V snap maximize 1`. Log `WindowSnapped: maximize, 1`, one packet.
 - **Proof.** Run `$V evidence window-snap`.
 
 ## Gotchas

@@ -1,6 +1,8 @@
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
-import Meta from 'gi://Meta';
+import Mtk from 'gi://Mtk';
+
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const DBUS_IFACE = `
 <node>
@@ -30,7 +32,7 @@ const DBUS_IFACE = `
   </interface>
 </node>`;
 
-export default class Mx4CursorTracker {
+export default class Mx4CursorTracker extends Extension {
     _pollId = 0;
     _currentMonitor = -1;
     _dbusImpl = null;
@@ -50,7 +52,7 @@ export default class Mx4CursorTracker {
             nodeInfo.interfaces[0], this);
         this._dbusImpl.export(Gio.DBus.session, '/com/mx4haptic/CursorTracker');
 
-        this._rect = new Meta.Rectangle({ x: 0, y: 0, width: 1, height: 1 });
+        this._rect = new Mtk.Rectangle({x: 0, y: 0, width: 1, height: 1});
 
         // Cursor boundary polling
         this._pollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
@@ -76,7 +78,7 @@ export default class Mx4CursorTracker {
             this._onFocusChanged();
         });
 
-        log('[mx4-cursor-tracker] enabled');
+        console.log('[mx4-cursor-tracker] enabled');
     }
 
     disable() {
@@ -107,7 +109,7 @@ export default class Mx4CursorTracker {
         this._lastFocusWindow = null;
         this._trackedWin = null;
         this._rect = null;
-        log('[mx4-cursor-tracker] disabled');
+        console.log('[mx4-cursor-tracker] disabled');
     }
 
     _disconnectTrackedWindow() {
@@ -139,10 +141,8 @@ export default class Mx4CursorTracker {
         if (monitorIdx !== this._currentMonitor) {
             const prev = this._currentMonitor;
             this._currentMonitor = monitorIdx;
-            if (this._dbusImpl) {
-                this._dbusImpl.emit_signal('BoundaryCrossed',
-                    new GLib.Variant('(iiii)', [prev, monitorIdx, x, y]));
-            }
+            this._dbusImpl?.emit_signal('BoundaryCrossed',
+                new GLib.Variant('(iiii)', [prev, monitorIdx, x, y]));
         }
     }
 
