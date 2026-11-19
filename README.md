@@ -47,7 +47,7 @@ This plays all 16 waveforms sequentially — you should feel each one on the mou
 Edit `~/.config/mx4-haptic/config.yaml`:
 
 ```yaml
-device_path: /dev/hidraw4        # adjust to your device
+device_path: /dev/hidraw4        # first place to look; see below
 feature_index: 11                # MX Master 4 HAPTIC feature index
 device_number: 0xFF              # 0xFF for Bluetooth direct
 
@@ -177,6 +177,16 @@ done
 # Or use Solaar
 solaar show
 ```
+
+hidraw numbers can change after a reboot or reconnect, so the daemon checks
+`device_path` against sysfs before every open. It only writes to a Logitech
+(`046d`) HID++ device whose name contains "MX Master 4", or, when
+`device_number` is a receiver slot (1–6), to a Logitech receiver. If
+`device_path` is something else, the daemon scans `/sys/class/hidraw` for a
+matching device and never falls back to an unrelated one; if none is found it
+logs an error and sends nothing.
+
+Device selection tests (no mouse needed): `python3 -m unittest discover -s tests`
 
 ## Dependencies
 

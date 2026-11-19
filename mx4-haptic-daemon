@@ -7,10 +7,11 @@ Triggers: display boundary crossing, desktop notifications.
 
 import argparse
 import copy
-import glob
+import errno
 import logging
 import os
 import signal
+import stat
 import struct
 import threading
 import time
@@ -47,6 +48,14 @@ WAVEFORMS = {
 }
 
 CONFIG_PATH = os.path.expanduser("~/.config/mx4-haptic/config.yaml")
+
+# Where hidraw nodes and their sysfs metadata live. Module-level so tests can
+# point them at a fake tree.
+DEV_DIR = "/dev"
+SYSFS_HIDRAW_DIR = "/sys/class/hidraw"
+
+LOGITECH_VENDOR_ID = 0x046D
+TARGET_NAME = "MX Master 4"
 
 log = logging.getLogger("mx4-haptic")
 
@@ -106,24 +115,163 @@ def load_config(config_path=CONFIG_PATH):
 # HapticSender — direct HID++ write to /dev/hidraw
 # ---------------------------------------------------------------------------
 
+def _report_ids(descriptor):
+    """Return the set of Report IDs declared in a HID report descriptor."""
+    ids = set()
+    i = 0
+    while i < len(descriptor):
+        prefix = descriptor[i]
+        if prefix == 0xFE:  # long item: 0xFE, size, tag, data...
+            size = descriptor[i + 1] if i + 1 < len(descriptor) else 0
+            i += 3 + size
+            continue
+        size = (0, 1, 2, 4)[prefix & 0x03]
+        if prefix & 0xFC == 0x84 and size >= 1 and i + 1 < len(descriptor):
+            ids.add(descriptor[i + 1])  # Global item "Report ID"
+        i += 1 + size
+    return ids
+
+
+def hidraw_info(name):
+    """Read sysfs metadata for hidraw node `name` (e.g. "hidraw4").
+
+    Returns a dict with vendor, product, hid_name and hidpp_long (whether the
+    report descriptor declares the HID++ long report 0x11), or None if sysfs
+    has no such device.
+    """
+    devdir = os.path.join(SYSFS_HIDRAW_DIR, name, "device")
+    try:
+        with open(os.path.join(devdir, "uevent")) as f:
+            uevent = dict(
+                line.rstrip("\n").split("=", 1) for line in f if "=" in line
+            )
+        with open(os.path.join(devdir, "report_descriptor"), "rb") as f:
+            descriptor = f.read()
+    except OSError:
+        return None
+    try:
+        # HID_ID=0005:0000046D:0000B042  (bus:vendor:product, hex)
+        _bus, vendor, product = (int(x, 16) for x in uevent["HID_ID"].split(":"))
+    except (KeyError, ValueError):
+        return None
+    return {
+        "vendor": vendor,
+        "product": product,
+        "hid_name": uevent.get("HID_NAME", ""),
+        "hidpp_long": HIDPP_LONG_REPORT_ID in _report_ids(descriptor),
+    }
+
+
+def _is_device_node(path):
+    try:
+        return stat.S_ISCHR(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
 class HapticSender:
-    """Sends HID++2.0 haptic waveform commands via /dev/hidraw."""
+    """Sends HID++2.0 haptic waveform commands via /dev/hidraw.
+
+    Packets only go to a hidraw node that sysfs identifies as a Logitech
+    HID++ device that is the MX Master 4 itself or (when device_number
+    addresses a receiver slot) a Logitech receiver. hidraw numbers move
+    between boots and replugs, so the configured path is checked on every
+    open, and a scan never falls back to "whatever opens first".
+    """
 
     FN_BYTE = 0x41  # (WRITE_FNID & 0xF0) | (SW_ID & 0x0F) = 0x40 | 0x01
 
     def __init__(self, device_path, feature_index, device_number):
+        self.configured_path = device_path
         self.device_path = device_path
         self.feature_index = feature_index
         self.device_number = device_number
         self._fd = None
         self._lock = threading.Lock()
 
-    def open(self):
-        """Open the hidraw device."""
-        self.close()
-        fd = os.open(self.device_path, os.O_RDWR)
+    # -- device identification ---------------------------------------------
+
+    def _is_target(self, info):
+        """True if sysfs info describes a device we may send haptics to."""
+        if info is None:
+            return False
+        if info["vendor"] != LOGITECH_VENDOR_ID or not info["hidpp_long"]:
+            return False
+        name = info["hid_name"].lower()
+        if TARGET_NAME.lower() in name:
+            return True
+        # Via a Bolt/Unifying receiver the mouse is addressed by its slot
+        # (device_number 1..6) on the receiver's own hidraw node.
+        return self.device_number != 0xFF and "receiver" in name
+
+    def _check_path(self, path):
+        """Return (ok, reason) for writing haptics to `path`."""
+        if not _is_device_node(path):
+            if os.path.isfile(path):
+                # A regular file is not a HID device and cannot reach another
+                # one; used by tests and the verify skill as a stand-in mouse.
+                return True, "regular file, not a device node"
+            return False, "not a device node"
+        name = os.path.basename(os.path.realpath(path))
+        info = hidraw_info(name)
+        if info is None:
+            return False, "no sysfs entry for %s" % name
+        if not self._is_target(info):
+            return False, "%s is %r (%04x:%04x), not %s" % (
+                name, info["hid_name"], info["vendor"], info["product"], TARGET_NAME)
+        return True, "%r (%04x:%04x)" % (
+            info["hid_name"], info["vendor"], info["product"])
+
+    def _scan(self):
+        """Return /dev paths of every hidraw node that passes _is_target."""
+        try:
+            names = os.listdir(SYSFS_HIDRAW_DIR)
+        except OSError:
+            return []
+        names = sorted(
+            (n for n in names if n.startswith("hidraw") and n[6:].isdigit()),
+            key=lambda n: int(n[6:]),
+        )
+        return [os.path.join(DEV_DIR, n) for n in names
+                if self._is_target(hidraw_info(n))]
+
+    # -- open / close ------------------------------------------------------
+
+    def _open_path(self, path):
+        fd = os.open(path, os.O_RDWR)
         self._fd = fd
-        log.info("Opened %s (fd=%d)", self.device_path, fd)
+        self.device_path = path
+        log.info("Opened %s (fd=%d)", path, fd)
+
+    def open(self):
+        """Open the MX Master 4's hidraw node, or raise OSError.
+
+        Tries the configured path first, then scans sysfs. A node is only
+        opened after it is identified as the mouse (or its receiver).
+        """
+        self.close()
+        ok, reason = self._check_path(self.configured_path)
+        if ok:
+            try:
+                self._open_path(self.configured_path)
+                log.debug("%s: %s", self.configured_path, reason)
+                return
+            except OSError as e:
+                log.warning("Cannot open %s: %s", self.configured_path, e)
+        else:
+            log.warning("Not using %s: %s", self.configured_path, reason)
+
+        log.info("Scanning %s for %s...", SYSFS_HIDRAW_DIR, TARGET_NAME)
+        for path in self._scan():
+            if path == self.configured_path:
+                continue  # already tried above
+            try:
+                self._open_path(path)
+                log.info("Found %s at %s", TARGET_NAME, path)
+                return
+            except OSError as e:
+                log.warning("Cannot open %s: %s", path, e)
+        raise OSError(errno.ENODEV, "%s not found on any hidraw device" % TARGET_NAME)
 
     def close(self):
         if self._fd is not None:
@@ -164,38 +312,17 @@ class HapticSender:
             for attempt in range(2):
                 try:
                     if self._fd is None:
-                        self._reconnect()
+                        self.open()
                     os.write(self._fd, pkt)
                     log.debug("Sent waveform 0x%02X", waveform_index)
                     return True
                 except OSError as e:
+                    self.close()
                     if attempt == 0:
                         log.warning("Write failed (%s), attempting reconnect", e)
-                        self._reconnect()
                     else:
                         log.error("Write failed after reconnect: %s", e)
             return False
-
-    def _reconnect(self):
-        """Try to re-open the configured path, or scan for the device."""
-        self.close()
-        # First try the configured path
-        try:
-            self.open()
-            return
-        except OSError:
-            pass
-        # Scan /dev/hidraw* for Logitech MX Master 4
-        log.info("Scanning /dev/hidraw* for MX Master 4...")
-        for path in sorted(glob.glob("/dev/hidraw*")):
-            try:
-                self.device_path = path
-                self.open()
-                log.info("Reconnected via %s", path)
-                return
-            except OSError:
-                continue
-        log.error("Could not find MX Master 4 on any hidraw device")
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +603,7 @@ def main():
     signal.signal(signal.SIGTERM, on_shutdown)
     signal.signal(signal.SIGINT, on_shutdown)
 
-    log.info("mx4-haptic-daemon started (device=%s)", cfg["device_path"])
+    log.info("mx4-haptic-daemon started (device=%s)", sender.device_path)
 
     try:
         loop.run()
