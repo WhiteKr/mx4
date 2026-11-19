@@ -104,6 +104,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg["notifications"]["waveform"], "HAPPY_ALERT")
         self.assertTrue(cfg["focus_change"]["enabled"])
 
+    def test_shipped_config_matches_defaults(self):
+        shipped = daemon.load_config(str(ROOT / "config.yaml"))
+        self.assertEqual(shipped, daemon.load_config("/nonexistent"))
+
 
 class TriggerTest(unittest.TestCase):
     def test_each_signal_plays_its_waveform(self):

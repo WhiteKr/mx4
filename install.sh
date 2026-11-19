@@ -13,7 +13,6 @@ install -Dm755 "$SCRIPT_DIR/mx4-haptic-daemon" "$HOME/.local/bin/mx4-haptic-daem
 # 2. Config (don't overwrite existing)
 echo "[2/4] Installing config..."
 CONFIG_DIR="$HOME/.config/mx4-haptic"
-mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     install -Dm644 "$SCRIPT_DIR/config.yaml" "$CONFIG_DIR/config.yaml"
 else
@@ -23,7 +22,6 @@ fi
 # 3. GNOME Shell extension
 echo "[3/4] Installing GNOME Shell extension..."
 EXT_DIR="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
-mkdir -p "$EXT_DIR"
 install -Dm644 "$SCRIPT_DIR/gnome-extension/metadata.json" "$EXT_DIR/metadata.json"
 install -Dm644 "$SCRIPT_DIR/gnome-extension/extension.js" "$EXT_DIR/extension.js"
 

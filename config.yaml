@@ -5,7 +5,6 @@ device_number: 0xFF
 display_boundary:
   enabled: true
   waveform: SUBTLE_COLLISION
-  poll_interval_ms: 50
   debounce_ms: 100
 
 notifications:

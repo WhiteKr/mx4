@@ -58,8 +58,7 @@ DEFAULT_CONFIG = {
     "display_boundary": {
         "enabled": True,
         "waveform": "SUBTLE_COLLISION",
-        "poll_interval_ms": 50,
-        "debounce_ms": 500,
+        "debounce_ms": 100,
     },
     "notifications": {
         "enabled": True,
