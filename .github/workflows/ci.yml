@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml shellcheck
+      - run: python3 -m unittest discover -s tests -v
+      - run: shellcheck -S warning install.sh tests/gnome-smoke/run.sh
+      - run: cp gnome-extension/extension.js /tmp/extension.mjs && node --check /tmp/extension.mjs
+
+  gnome-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gnome-shell python3-dbus python3-gi python3-yaml gir1.2-gtk-4.0 dconf-cli
+      - run: sudo tests/gnome-smoke/run.sh

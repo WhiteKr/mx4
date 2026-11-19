@@ -9,9 +9,7 @@ Run: python3 -m unittest discover -s tests
 import importlib.machinery
 import importlib.util
 import os
-import sys
 import tempfile
-import types
 import unittest
 from unittest import mock
 
@@ -19,18 +17,6 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_daemon():
-    # The daemon imports dbus/gi/yaml at module level; selection logic needs
-    # none of them, so stub whichever are missing.
-    for name in ("dbus", "dbus.mainloop", "dbus.mainloop.glib", "gi",
-                 "gi.repository", "yaml"):
-        if name not in sys.modules:
-            try:
-                __import__(name)
-            except ImportError:
-                mod = types.ModuleType(name)
-                mod.DBusGMainLoop = None
-                mod.GLib = None
-                sys.modules[name] = mod
     path = os.path.join(REPO, "mx4-haptic-daemon")
     loader = importlib.machinery.SourceFileLoader("mx4_haptic_daemon", path)
     spec = importlib.util.spec_from_loader(loader.name, loader)

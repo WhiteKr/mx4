@@ -1,6 +1,10 @@
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
-import Meta from 'gi://Meta';
+import Mtk from 'gi://Mtk';
+
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+
+const SNAP_SETTLE_MS = 100;
 
 const DBUS_IFACE = `
 <node>
@@ -30,7 +34,7 @@ const DBUS_IFACE = `
   </interface>
 </node>`;
 
-export default class Mx4CursorTracker {
+export default class Mx4CursorTracker extends Extension {
     _pollId = 0;
     _currentMonitor = -1;
     _dbusImpl = null;
@@ -42,7 +46,7 @@ export default class Mx4CursorTracker {
     _trackedWinIds = [];
     _lastSnapState = null;
     _lastFocusWindow = null;
-    _snapCheckId = 0;
+    _snapSettleId = 0;
 
     enable() {
         const nodeInfo = Gio.DBusNodeInfo.new_for_xml(DBUS_IFACE);
@@ -50,15 +54,13 @@ export default class Mx4CursorTracker {
             nodeInfo.interfaces[0], this);
         this._dbusImpl.export(Gio.DBus.session, '/com/mx4haptic/CursorTracker');
 
-        this._rect = new Meta.Rectangle({ x: 0, y: 0, width: 1, height: 1 });
+        this._rect = new Mtk.Rectangle({x: 0, y: 0, width: 1, height: 1});
 
-        // Cursor boundary polling
         this._pollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
             this._checkCursor();
             return GLib.SOURCE_CONTINUE;
         });
 
-        // Workspace switch detection
         const wsMgr = global.workspace_manager;
         this._currentWorkspace = wsMgr.get_active_workspace_index();
         this._wsChangedId = wsMgr.connect('active-workspace-changed', () => {
@@ -71,12 +73,11 @@ export default class Mx4CursorTracker {
             }
         });
 
-        // Focus change + window snap detection
         this._focusWindowId = global.display.connect('notify::focus-window', () => {
             this._onFocusChanged();
         });
 
-        log('[mx4-cursor-tracker] enabled');
+        console.log('[mx4-cursor-tracker] enabled');
     }
 
     disable() {
@@ -84,9 +85,9 @@ export default class Mx4CursorTracker {
             GLib.source_remove(this._pollId);
             this._pollId = 0;
         }
-        if (this._snapCheckId) {
-            GLib.source_remove(this._snapCheckId);
-            this._snapCheckId = 0;
+        if (this._snapSettleId) {
+            GLib.source_remove(this._snapSettleId);
+            this._snapSettleId = 0;
         }
         if (this._wsChangedId) {
             global.workspace_manager.disconnect(this._wsChangedId);
@@ -107,7 +108,7 @@ export default class Mx4CursorTracker {
         this._lastFocusWindow = null;
         this._trackedWin = null;
         this._rect = null;
-        log('[mx4-cursor-tracker] disabled');
+        console.log('[mx4-cursor-tracker] disabled');
     }
 
     _disconnectTrackedWindow() {
@@ -139,10 +140,8 @@ export default class Mx4CursorTracker {
         if (monitorIdx !== this._currentMonitor) {
             const prev = this._currentMonitor;
             this._currentMonitor = monitorIdx;
-            if (this._dbusImpl) {
-                this._dbusImpl.emit_signal('BoundaryCrossed',
-                    new GLib.Variant('(iiii)', [prev, monitorIdx, x, y]));
-            }
+            this._dbusImpl?.emit_signal('BoundaryCrossed',
+                new GLib.Variant('(iiii)', [prev, monitorIdx, x, y]));
         }
     }
 
@@ -152,12 +151,10 @@ export default class Mx4CursorTracker {
 
         this._lastFocusWindow = win;
 
-        // Emit focus change signal
         const name = win.get_wm_class() || win.get_title() || 'unknown';
         this._dbusImpl?.emit_signal('FocusChanged',
             new GLib.Variant('(s)', [name]));
 
-        // Re-track window for snap detection
         this._disconnectTrackedWindow();
         this._lastSnapState = this._getSnapState(win);
         this._trackedWin = win;
@@ -194,12 +191,11 @@ export default class Mx4CursorTracker {
     }
 
     _onWindowSizeChanged(win) {
-        // Debounce — tile animations fire multiple size-changed events
-        if (this._snapCheckId) {
-            GLib.source_remove(this._snapCheckId);
+        if (this._snapSettleId) {
+            GLib.source_remove(this._snapSettleId);
         }
-        this._snapCheckId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-            this._snapCheckId = 0;
+        this._snapSettleId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SNAP_SETTLE_MS, () => {
+            this._snapSettleId = 0;
             const newState = this._getSnapState(win);
             if (newState && newState !== this._lastSnapState) {
                 this._dbusImpl?.emit_signal('WindowSnapped',

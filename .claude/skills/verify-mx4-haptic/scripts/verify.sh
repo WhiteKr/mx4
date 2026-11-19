@@ -214,15 +214,15 @@ parse_expect() {
 }
 
 cmd_boundary()  { load_run; parse_expect "$@"; [ ${#ARGS[@]} -eq 4 ] || die "boundary FROM TO X Y"
-  trigger "Boundary crossed" emit BoundaryCrossed "${ARGS[@]}"; }
+  trigger "BoundaryCrossed:" emit BoundaryCrossed "${ARGS[@]}"; }
 cmd_workspace() { load_run; parse_expect "$@"; [ ${#ARGS[@]} -eq 2 ] || die "workspace FROM TO"
-  trigger "Workspace switched" emit WorkspaceSwitched "${ARGS[@]}"; }
+  trigger "WorkspaceSwitched:" emit WorkspaceSwitched "${ARGS[@]}"; }
 cmd_snap()      { load_run; parse_expect "$@"; [ ${#ARGS[@]} -eq 2 ] || die "snap TYPE MONITOR"
-  trigger "Window snapped" emit WindowSnapped "'${ARGS[0]}'" "${ARGS[1]}"; }
+  trigger "WindowSnapped:" emit WindowSnapped "'${ARGS[0]}'" "${ARGS[1]}"; }
 cmd_focus()     { load_run; parse_expect "$@"; [ ${#ARGS[@]} -eq 1 ] || die "focus NAME"
-  trigger "Focus changed" emit FocusChanged "'${ARGS[0]}'"; }
+  trigger "FocusChanged:" emit FocusChanged "'${ARGS[0]}'"; }
 cmd_notify()    { load_run; parse_expect "$@"; [ ${#ARGS[@]} -eq 1 ] || die "notify SUMMARY"
-  trigger "Notification received" gdbus call --session \
+  trigger "Notify:" gdbus call --session \
     --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
     --method org.freedesktop.Notifications.Notify -- \
     mx4-verify 0 '' "${ARGS[0]}" 'sent by verify.sh' '[]' '{}' 3000; }

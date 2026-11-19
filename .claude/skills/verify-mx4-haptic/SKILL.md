@@ -30,7 +30,7 @@ The feature recipes are in [`features/README.md`](features/README.md). Read it b
 
 - Each `launch` gets its own bus, fake device, config and run dir under `/tmp/mx4-verify/<RUN_ID>/`. Parallel runs are safe; pick one with `MX4_RUN=<RUN_ID>` (default: the latest launch).
 - The run never touches the user's real session bus, their installed `~/.local/bin/mx4-haptic-daemon`, the `mx4-haptic` systemd user service, `~/.config/mx4-haptic/`, or any `/dev/hidraw*`.
-- **Never point an automated run at a real `/dev/hidraw*`.** If a write to the configured device fails, the daemon's `_reconnect()` scans `/dev/hidraw*` in order and writes HID++ packets to the first device it can open, which may not be the mouse. That is why cleanup stops the daemon before deleting its fake device, and why doctor fails if any real hidraw is open.
+- **Never point an automated run at a real `/dev/hidraw*`.** The daemon only writes to a node sysfs identifies as the MX Master 4 (or its receiver), but a real mouse would still vibrate and a misidentified node would still get packets. That is also why cleanup stops the daemon before deleting its fake device, and why doctor fails if any real hidraw is open.
 - Driving the real mouse is a human-in-the-loop check. See "Real hardware" below.
 
 ## Launch
@@ -62,11 +62,11 @@ It checks: bus, daemon and notification server pids are alive and are the proces
 Each trigger command fires the real D-Bus event, waits up to 3 s, then prints the new daemon log lines and the decoded new packets, and exits non-zero unless exactly the expected number of packets appeared (and, when one is expected, the matching log line).
 
 ```bash
-$V boundary FROM TO X Y      # BoundaryCrossed(iiii)       log: "Boundary crossed: monitor A → B"
-$V workspace FROM TO         # WorkspaceSwitched(ii)       log: "Workspace switched: A → B"
-$V snap TYPE MONITOR         # WindowSnapped(si), TYPE left|right|maximize  log: "Window snapped: TYPE"
-$V focus NAME                # FocusChanged(s)             log: "Focus changed: NAME"
-$V notify SUMMARY            # Notify() to org.freedesktop.Notifications   log: "Notification received: SUMMARY"
+$V boundary FROM TO X Y      # BoundaryCrossed(iiii)       log: "BoundaryCrossed: A, B, X, Y"
+$V workspace FROM TO         # WorkspaceSwitched(ii)       log: "WorkspaceSwitched: A, B"
+$V snap TYPE MONITOR         # WindowSnapped(si), TYPE left|right|maximize  log: "WindowSnapped: TYPE, MONITOR"
+$V focus NAME                # FocusChanged(s)             log: "FocusChanged: NAME"
+$V notify SUMMARY            # Notify() to org.freedesktop.Notifications   log: "Notify: SUMMARY"
 ```
 
 Options for every trigger: `--repeat N` fires N events back to back (about 20 ms apart), `--expect K` asserts exactly K new packets (default 1, `0` asserts suppression). Use them for debounce and cooldown:

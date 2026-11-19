@@ -6,16 +6,20 @@ On Windows/macOS, Logi Options+ provides haptic feedback for display transitions
 
 ## Features
 
-- **Display boundary haptic** — vibration when the cursor moves between monitors
-- **Notification haptic** — vibration when a desktop notification arrives
-- 16 built-in waveforms (configurable per trigger)
+- **Display boundary** — vibration when the cursor moves between monitors
+- **Workspace switch** — vibration when the active workspace changes
+- **Window snap** — vibration when a window is maximized or tiled left/right
+- **Focus change** — vibration when a different window takes focus
+- **Notification** — vibration when a desktop notification arrives
+- 16 built-in waveforms, configurable per trigger
 - Near-instant response via direct HID++ writes (no Solaar overhead)
+- Finds the mouse automatically and reconnects after sleep or re-pairing
 - Runs as a systemd user service
 
 ## Requirements
 
 - Logitech MX Master 4 (connected via Bluetooth)
-- GNOME 46 on Wayland (Ubuntu 24.04+)
+- GNOME Shell 46–50 on Wayland (Ubuntu 24.04 or newer)
 - Python 3.10+
 - Python packages: `dbus-python`, `PyGObject`, `PyYAML`
 - Access to `/dev/hidraw*` for your mouse (see [Device Access](#device-access))
@@ -51,17 +55,38 @@ device_path: /dev/hidraw4        # first place to look; see below
 feature_index: 11                # MX Master 4 HAPTIC feature index
 device_number: 0xFF              # 0xFF for Bluetooth direct
 
-display_boundary:
+display_boundary:                # cursor crosses to another monitor
   enabled: true
-  waveform: SUBTLE_COLLISION     # waveform on monitor crossing
-  poll_interval_ms: 50
+  waveform: SUBTLE_COLLISION
   debounce_ms: 100               # min interval between triggers
 
-notifications:
+notifications:                   # desktop notification arrives
   enabled: true
-  waveform: HAPPY_ALERT          # waveform on notification
-  cooldown_s: 2                  # min interval between triggers
+  waveform: HAPPY_ALERT
+  cooldown_s: 2
+
+workspace_switch:                # active workspace changes
+  enabled: true
+  waveform: SUBTLE_COLLISION
+
+window_snap:                     # window maximized or tiled left/right
+  enabled: true
+  waveform: SUBTLE_COLLISION
+  debounce_ms: 300
+
+focus_change:                    # another window takes focus
+  enabled: true
+  waveform: SUBTLE_COLLISION
+  cooldown_s: 0.3
 ```
+
+hidraw numbers can change after a reboot or reconnect, so the daemon checks
+`device_path` against sysfs before every open. It only writes to a Logitech
+(`046d`) HID++ device whose name contains "MX Master 4", or, when
+`device_number` is a receiver slot (1–6), to a Logitech receiver. If
+`device_path` is something else, the daemon scans `/sys/class/hidraw` for a
+matching device and never falls back to an unrelated one; if none is found it
+logs an error and sends nothing.
 
 ### Available Waveforms
 
@@ -105,36 +130,36 @@ sudo udevadm trigger
 Alternatively, set an ACL on the specific device:
 
 ```bash
-sudo setfacl -m u:$USER:rw /dev/hidraw4
+sudo setfacl -m u:$USER:rw /dev/hidrawN   # the node from "Finding Your Device"
 ```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────┐
-│  GNOME Shell Extension          │
-│  (mx4-cursor-tracker@local)     │
-│                                 │
-│  Polls global.get_pointer()     │
-│  every 50ms inside compositor   │
-│         │                       │
-│         │ D-Bus signal:         │
-│         │ BoundaryCrossed       │
-└─────────┼───────────────────────┘
+┌──────────────────────────────────────┐
+│  GNOME Shell extension               │
+│  (mx4-cursor-tracker@local)          │
+│                                      │
+│  pointer poll (50 ms), workspace,    │
+│  focus and window-size events        │
+│         │                            │
+│         │ D-Bus signals:             │
+│         │ BoundaryCrossed            │
+│         │ WorkspaceSwitched          │
+│         │ WindowSnapped              │
+│         │ FocusChanged               │
+└─────────┼────────────────────────────┘
           ▼
-┌─────────────────────────────────┐
-│  mx4-haptic-daemon              │
-│                                 │
-│  ┌──────────┐  ┌─────────────┐  │
-│  │ Boundary  │  │ Notification│  │
-│  │ Detector  │  │ Listener    │  │
-│  │ (D-Bus)   │  │ (D-Bus)    │  │
-│  └─────┬─────┘  └──────┬─────┘  │
-│        └────────┬───────┘        │
-│                 ▼                │
-│          HapticSender            │
-│          /dev/hidraw ──► Mouse   │
-└─────────────────────────────────┘
+┌──────────────────────────────────────┐
+│  mx4-haptic-daemon                   │
+│                                      │
+│  Trigger per enabled config section  │◄── Notify calls on
+│  (throttle, then play waveform)      │    org.freedesktop.Notifications
+│                 │                    │
+│                 ▼                    │
+│          HapticSender                │
+│          /dev/hidraw ──► Mouse       │
+└──────────────────────────────────────┘
 ```
 
 ### Why not Solaar?
@@ -143,7 +168,7 @@ Solaar's `solaar config <device> haptic-play <waveform>` works but takes ~1.5 se
 
 ### Why a GNOME extension?
 
-On GNOME 46 Wayland, there is no userspace API for cursor position tracking. XWayland's `query_pointer` only updates when the cursor is over an X11 window. The GNOME Shell extension runs inside the Mutter compositor and can call `global.get_pointer()` directly.
+On GNOME Wayland, there is no userspace API for cursor position tracking. XWayland's `query_pointer` only updates when the cursor is over an X11 window. The GNOME Shell extension runs inside the Mutter compositor and can call `global.get_pointer()` directly.
 
 ## Service Management
 
@@ -178,15 +203,7 @@ done
 solaar show
 ```
 
-hidraw numbers can change after a reboot or reconnect, so the daemon checks
-`device_path` against sysfs before every open. It only writes to a Logitech
-(`046d`) HID++ device whose name contains "MX Master 4", or, when
-`device_number` is a receiver slot (1–6), to a Logitech receiver. If
-`device_path` is something else, the daemon scans `/sys/class/hidraw` for a
-matching device and never falls back to an unrelated one; if none is found it
-logs an error and sends nothing.
-
-Device selection tests (no mouse needed): `python3 -m unittest discover -s tests`
+You only need this when the daemon logs that it cannot find the mouse.
 
 ## Dependencies
 
@@ -194,6 +211,15 @@ Device selection tests (no mouse needed): `python3 -m unittest discover -s tests
 # Ubuntu/Debian
 sudo apt install python3 python3-dbus python3-gi python3-yaml
 ```
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests -v   # unit tests, no mouse or GNOME needed
+sudo tests/gnome-smoke/run.sh              # headless GNOME Shell end-to-end test (throwaway machine)
+```
+
+CI runs both on every pull request.
 
 ## License
 
