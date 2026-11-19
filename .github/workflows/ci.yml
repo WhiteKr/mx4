@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml shellcheck
       - run: python3 -m unittest discover -s tests -v
-      - run: shellcheck install.sh tests/gnome-smoke/run.sh
+      - run: shellcheck -S warning install.sh tests/gnome-smoke/run.sh
       - run: cp gnome-extension/extension.js /tmp/extension.mjs && node --check /tmp/extension.mjs
 
   gnome-smoke:

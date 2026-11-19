@@ -28,6 +28,14 @@ if [ "${1:-}" != "--inside" ]; then
 fi
 
 W=$HOME
+dump_logs_on_failure() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "--- daemon log"; cat "$W/daemon.log" 2>/dev/null || true
+        echo "--- shell log"; tail -n 60 "$W/shell.log" 2>/dev/null || true
+    fi
+}
+trap dump_logs_on_failure EXIT
 export XDG_RUNTIME_DIR=$W/run
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 EXT=$W/.local/share/gnome-shell/extensions
@@ -68,7 +76,6 @@ gdbus call --session --dest org.freedesktop.Notifications --object-path /org/fre
     --method org.freedesktop.Notifications.Notify smoke 0 "" hello body '[]' '{}' 1000 >/dev/null
 sleep 1
 
-cat "$W/daemon.log"
 fail=0
 for t in BoundaryCrossed WorkspaceSwitched FocusChanged WindowSnapped Notify; do
     grep -q "INFO $t:" "$W/daemon.log" || { echo "FAIL: no $t"; fail=1; }
