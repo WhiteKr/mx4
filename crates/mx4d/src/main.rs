@@ -16,7 +16,7 @@ use tracing::info;
 #[derive(Parser)]
 #[command(version, about = "MX Master 4 daemon for Linux")]
 struct Args {
-    /// Play every waveform once and exit
+    /// Play every waveform once and exit (works even with [haptic] disabled)
     #[arg(long)]
     test: bool,
     /// Debug logging
@@ -61,6 +61,7 @@ fn main() -> Result<()> {
 }
 
 fn run_test(haptics: &Haptics) {
+    haptics.connect();
     println!("MX Master 4 Haptic Test — playing all waveforms");
     let mut waveforms = WAVEFORMS.to_vec();
     waveforms.sort_by_key(|&(_, i)| i);
