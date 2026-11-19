@@ -91,6 +91,31 @@ class PacketTest(unittest.TestCase):
             self.assertEqual(Path(dev.name).read_bytes(), b"")
 
 
+class DeviceDiscoveryTest(unittest.TestCase):
+    def make_sysfs(self, root, devices):
+        for node, name in devices.items():
+            d = Path(root, node, "device")
+            d.mkdir(parents=True)
+            (d / "uevent").write_text(f"HID_ID=0005:0000046D:0000B042\nHID_NAME={name}\n")
+
+    def test_finds_mx_master_4_among_other_hid_devices(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.make_sysfs(root, {"hidraw0": "AT Translated Keyboard",
+                                   "hidraw1": "MX Keys",
+                                   "hidraw5": "MX Master 4"})
+            self.assertEqual(daemon.find_mx4(root), "/dev/hidraw5")
+
+    def test_never_falls_back_to_unrelated_device(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.make_sysfs(root, {"hidraw0": "AT Translated Keyboard"})
+            self.assertIsNone(daemon.find_mx4(root))
+
+    def test_missing_mouse_returns_false_without_raising(self):
+        sender = daemon.HapticSender("auto", feature_index=11, device_number=0xFF)
+        with mock.patch.object(daemon, "find_mx4", return_value=None):
+            self.assertFalse(sender.play("HAPPY_ALERT"))
+
+
 class ConfigTest(unittest.TestCase):
     def test_user_values_merge_over_defaults(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:

@@ -1,4 +1,4 @@
-device_path: /dev/hidraw4
+device_path: auto      # or a fixed node such as /dev/hidraw4
 feature_index: 11
 device_number: 0xFF
 
