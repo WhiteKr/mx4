@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive mx4-haptic-daemon in isolation: a private D-Bus session bus, a fake
+# Drive mx4d (haptic module) in isolation: a private D-Bus session bus, a fake
 # hidraw file standing in for the mouse, and a fake notification server.
 # See ../SKILL.md for the full recipe. Run with no arguments for usage.
 set -euo pipefail
@@ -26,15 +26,16 @@ usage: verify.sh <command> [args]
   notify SUMMARY         send a desktop notification (Notify call)
   packets                decode every HID++ packet the daemon wrote
   evidence [LABEL]       snapshot log + decoded packets into the evidence dir
-  test-mode              run 'mx4-haptic-daemon --test' against a fake device
+  test-mode              run 'mx4d --test' against a fake device
   cleanup                stop what launch started; keeps evidence
 
 Trigger commands accept --repeat N (fire N events back to back) and
 --expect K (assert exactly K new packets; default 1). Example, debounce:
   verify.sh boundary 0 1 1920 540 --repeat 2 --expect 1
 Env: MX4_RUN=<run id> (default: latest run), MX4_CONFIG=<base config for
-     launch> (default: repo config.yaml), MX4_VERIFY_SCRATCH,
-     MX4_VERIFY_EVIDENCE, MX4_PY (python with dbus+gi+yaml).
+     launch> (default: repo config.toml), MX4_VERIFY_SCRATCH,
+     MX4_VERIFY_EVIDENCE, MX4_PY (python with dbus+gi), MX4_BIN (mx4d
+     binary; default: cargo build --release of this checkout).
 EOF
 }
 
@@ -42,11 +43,27 @@ find_py() {
   if [ -n "${MX4_PY:-}" ]; then echo "$MX4_PY"; return; fi
   for p in python3 /usr/bin/python3 /usr/bin/python3.12 python3.12; do
     if command -v "$p" >/dev/null 2>&1 &&
-       "$p" -c 'import dbus, yaml; from gi.repository import GLib' 2>/dev/null; then
+       "$p" -c 'import dbus; from gi.repository import GLib' 2>/dev/null; then
       command -v "$p"; return
     fi
   done
-  die "no python with dbus-python, PyGObject and PyYAML (apt install python3-dbus python3-gi python3-yaml)"
+  die "no python with dbus-python and PyGObject (apt install python3-dbus python3-gi)"
+}
+
+# The daemon under test: MX4_BIN, or a release build of this checkout.
+find_bin() {
+  if [ -n "${MX4_BIN:-}" ]; then echo "$MX4_BIN"; return; fi
+  cargo build --quiet --release --manifest-path "$REPO/Cargo.toml" >&2 ||
+    die "cargo build failed"
+  echo "$REPO/target/release/mx4d"
+}
+
+# point_config BASE OUT FAKE_DEV: copy BASE with [device] path set to FAKE_DEV.
+point_config() {
+  [ -f "$1" ] || die "config $1 not found"
+  grep -q '^path = ' "$1" || die "config $1 needs a 'path = ...' line under [device]"
+  sed "s|^path = .*|path = \"$3\"|" "$1" >"$2"
+  grep -qF "path = \"$3\"" "$2" || die "could not point config at fake device"
 }
 
 run_dir() {
@@ -97,6 +114,7 @@ packet_count() { echo $(( $(stat -c %s "$FAKE_DEV") / 20 )); }
 
 cmd_launch() {
   PY="$(find_py)"
+  BIN="$(find_bin)"
   mkdir -p "$SCRATCH_ROOT"
   local id; id="run-$(date +%Y%m%d-%H%M%S)-$$"
   RUN="$SCRATCH_ROOT/$id"
@@ -104,14 +122,10 @@ cmd_launch() {
   mkdir -p "$RUN" "$EVID"
   FAKE_DEV="$RUN/fake-hidraw"
   : >"$FAKE_DEV"
-  CONFIG="$RUN/config.yaml"
+  CONFIG="$RUN/config.toml"
   # Base config (repo's, or MX4_CONFIG) with the device swapped for the fake
   # file. The real /dev/hidraw* must never be the target of an automated run.
-  local base="${MX4_CONFIG:-$REPO/config.yaml}"
-  [ -f "$base" ] || die "config $base not found"
-  grep -q "^device_path:" "$base" || die "config $base needs a top-level device_path: line"
-  sed "s|^device_path:.*|device_path: $FAKE_DEV|" "$base" >"$CONFIG"
-  grep -q "^device_path: $FAKE_DEV\$" "$CONFIG" || die "could not point config at fake device"
+  point_config "${MX4_CONFIG:-$REPO/config.toml}" "$CONFIG" "$FAKE_DEV"
 
   local out; out="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
   BUS_ADDR="$(sed -n 1p <<<"$out")"; BUS_PID="$(sed -n 2p <<<"$out")"
@@ -121,13 +135,14 @@ cmd_launch() {
     >"$RUN/notifyd.out" 2>&1 &
   NOTIFYD_PID=$!
 
-  "$PY" "$REPO/mx4-haptic-daemon" --config "$CONFIG" --verbose \
+  "$BIN" --config "$CONFIG" --verbose \
     >"$EVID/daemon.log" 2>&1 &
   DAEMON_PID=$!
 
   cat >"$RUN/env" <<EOF
 RUN_ID=$id
 PY=$PY
+BIN=$BIN
 REPO=$REPO
 FAKE_DEV=$FAKE_DEV
 CONFIG=$CONFIG
@@ -142,7 +157,7 @@ EOF
 
   # Ready = the daemon logged its start line AND the notification name is owned.
   for _ in $(seq 1 50); do
-    if grep -q "mx4-haptic-daemon started" "$EVID/daemon.log" &&
+    if grep -q "mx4d started" "$EVID/daemon.log" &&
        grep -q "fake-notifyd ready" "$RUN/notifyd.out"; then
       echo "RUN_ID=$id"
       echo "evidence: $EVID"
@@ -172,7 +187,7 @@ cmd_doctor() {
   check "bus answers and owns org.freedesktop.Notifications" \
     "gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
        --method org.freedesktop.DBus.NameHasOwner org.freedesktop.Notifications 2>/dev/null | grep -q true"
-  check "daemon logged its start line" "grep -q 'mx4-haptic-daemon started' '$EVID/daemon.log'"
+  check "daemon logged its start line" "grep -q 'mx4d started' '$EVID/daemon.log'"
   echo "packets written so far: $(packet_count)"
   return $bad
 }
@@ -234,21 +249,22 @@ cmd_evidence() {
   local label="${1:-snapshot}"
   decode "$FAKE_DEV" >"$EVID/packets-$label.txt"
   cp "$FAKE_DEV" "$EVID/fake-hidraw-$label.bin"
-  cp "$CONFIG" "$EVID/config.yaml"
+  cp "$CONFIG" "$EVID/config.toml"
   { echo "run=$RUN_ID rev=$GIT_REV label=$label at=$(date -Is)"; } >>"$EVID/INDEX"
   echo "$EVID/packets-$label.txt"
 }
 
 cmd_test_mode() {
   PY="$(find_py)"
+  local bin; bin="$(find_bin)"
   mkdir -p "$SCRATCH_ROOT"
   local id; id="test-$(date +%Y%m%d-%H%M%S)-$$"
   local dir="$SCRATCH_ROOT/$id" evid="$EVIDENCE_ROOT/$id"
   mkdir -p "$dir" "$evid"
   FAKE_DEV="$dir/fake-hidraw"; : >"$FAKE_DEV"
-  sed "s|^device_path:.*|device_path: $FAKE_DEV|" "$REPO/config.yaml" >"$dir/config.yaml"
+  point_config "$REPO/config.toml" "$dir/config.toml" "$FAKE_DEV"
   set +e
-  "$PY" "$REPO/mx4-haptic-daemon" --config "$dir/config.yaml" --test >"$evid/test-mode.out" 2>&1
+  "$bin" --config "$dir/config.toml" --test >"$evid/test-mode.out" 2>&1
   local rc=$?
   set -e
   echo "exit=$rc" >>"$evid/test-mode.out"
@@ -268,7 +284,7 @@ cmd_cleanup() {
   if [ -f "$FAKE_DEV" ]; then
     PY="$PY" decode "$FAKE_DEV" >"$EVID/packets-final.txt" || true
     cp "$FAKE_DEV" "$EVID/fake-hidraw-final.bin" || true
-    cp "$CONFIG" "$EVID/config.yaml" || true
+    cp "$CONFIG" "$EVID/config.toml" || true
   fi
   # Stop the daemon first, so it never outlives its fake device and falls
   # back to scanning real /dev/hidraw*.

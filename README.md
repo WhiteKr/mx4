@@ -1,38 +1,50 @@
-# mx4-haptic
+# mx4
 
-Haptic feedback daemon for the **Logitech MX Master 4** on Linux (GNOME/Wayland).
+A daemon for the **Logitech MX Master 4** on Linux (GNOME/Wayland), built one feature at a time.
 
-On Windows/macOS, Logi Options+ provides haptic feedback for display transitions and notifications. This project brings that experience to Linux by sending HID++2.0 commands directly to the mouse via `/dev/hidraw`, achieving sub-millisecond response times.
+`mx4d` owns the connection to the mouse (HID++ 2.0 over `/dev/hidraw`) and runs the
+feature modules that are enabled in its config. Today there is one module:
 
-## Features
+- **haptic** — vibration on desktop events, which Logi Options+ offers only on Windows/macOS:
+  - **Display boundary** — the cursor moves between monitors
+  - **Workspace switch** — the active workspace changes
+  - **Window snap** — a window is maximized or tiled left/right
+  - **Focus change** — a different window takes focus
+  - **Notification** — a desktop notification arrives
+  - 16 built-in waveforms, configurable per trigger, sent in under 1 ms
 
-- **Display boundary** — vibration when the cursor moves between monitors
-- **Workspace switch** — vibration when the active workspace changes
-- **Window snap** — vibration when a window is maximized or tiled left/right
-- **Focus change** — vibration when a different window takes focus
-- **Notification** — vibration when a desktop notification arrives
-- 16 built-in waveforms, configurable per trigger
-- Near-instant response via direct HID++ writes (no Solaar overhead)
-- Finds the mouse automatically and reconnects after sleep or re-pairing
-- Runs as a systemd user service
+The daemon finds the mouse automatically and reconnects after sleep or re-pairing.
+
+## Layout
+
+```
+crates/mx4-core     mouse connection: hidraw discovery, HID++ requests, haptics
+crates/mx4-haptic   haptic module: desktop-event triggers
+crates/mx4d         the daemon binary; each module is a cargo feature
+gnome-extension/    GNOME Shell extension that reports desktop events over D-Bus
+```
+
+A new feature goes in its own `crates/mx4-<name>` crate that depends only on
+`mx4-core`, plus a cargo feature and a config section in `mx4d`.
 
 ## Requirements
 
-- Logitech MX Master 4 (connected via Bluetooth)
+- Logitech MX Master 4 (Bluetooth, or a Bolt receiver)
 - GNOME Shell 46–50 on Wayland (Ubuntu 24.04 or newer)
-- Python 3.10+
-- Python packages: `dbus-python`, `PyGObject`, `PyYAML`
+- Rust toolchain to build (`cargo`, from [rustup.rs](https://rustup.rs))
 - Access to `/dev/hidraw*` for your mouse (see [Device Access](#device-access))
 
 ## Installation
 
 ```bash
-git clone https://github.com/whitekr/mx4-haptic.git
-cd mx4-haptic
+git clone https://github.com/WhiteKr/mx4.git
+cd mx4
 ./install.sh
 ```
 
-Then **log out and log back in** to load the GNOME Shell extension, and run:
+`install.sh` builds `mx4d`, installs it to `~/.local/bin`, installs the GNOME extension
+and the `mx4d` systemd user service, and removes the old Python `mx4-haptic` service if
+it finds one. If the extension is new, log out and back in, then run:
 
 ```bash
 gnome-extensions enable mx4-cursor-tracker@local
@@ -41,52 +53,37 @@ gnome-extensions enable mx4-cursor-tracker@local
 ### Quick Test
 
 ```bash
-mx4-haptic-daemon --test
+mx4d --test
 ```
 
-This plays all 16 waveforms sequentially — you should feel each one on the mouse.
+This plays all 16 waveforms in a row; you should feel each one on the mouse.
 
 ## Configuration
 
-Edit `~/.config/mx4-haptic/config.yaml`:
+Edit `~/.config/mx4/config.toml` and restart the service. Keys you leave out keep their
+defaults, so a config can be as short as one changed waveform. See
+[`config.toml`](config.toml) for every key:
 
-```yaml
-device_path: /dev/hidraw4        # first place to look; see below
-feature_index: 11                # MX Master 4 HAPTIC feature index
-device_number: 0xFF              # 0xFF for Bluetooth direct
+```toml
+[device]
+path = "auto"          # or a fixed node such as "/dev/hidraw4"
+number = 0xFF          # 0xFF for Bluetooth direct, 1-6 for a Bolt receiver slot
+# feature_index = 11   # HAPTIC feature index; asked from the mouse when unset
 
-display_boundary:                # cursor crosses to another monitor
-  enabled: true
-  waveform: SUBTLE_COLLISION
-  debounce_ms: 100               # min interval between triggers
+[haptic.notifications]
+waveform = "HAPPY_ALERT"
+cooldown_ms = 2000     # events closer together play once
 
-notifications:                   # desktop notification arrives
-  enabled: true
-  waveform: HAPPY_ALERT
-  cooldown_s: 2
-
-workspace_switch:                # active workspace changes
-  enabled: true
-  waveform: SUBTLE_COLLISION
-
-window_snap:                     # window maximized or tiled left/right
-  enabled: true
-  waveform: SUBTLE_COLLISION
-  debounce_ms: 300
-
-focus_change:                    # another window takes focus
-  enabled: true
-  waveform: SUBTLE_COLLISION
-  cooldown_s: 0.3
+[haptic.focus_change]
+enabled = false
 ```
 
-hidraw numbers can change after a reboot or reconnect, so the daemon checks
-`device_path` against sysfs before every open. It only writes to a Logitech
-(`046d`) HID++ device whose name contains "MX Master 4", or, when
-`device_number` is a receiver slot (1–6), to a Logitech receiver. If
-`device_path` is something else, the daemon scans `/sys/class/hidraw` for a
-matching device and never falls back to an unrelated one; if none is found it
-logs an error and sends nothing.
+hidraw numbers can change after a reboot or reconnect, so the daemon checks `path`
+against sysfs before every open. It only writes to a Logitech (`046d`) HID++ device whose
+name contains "MX Master 4", or, when `number` is a receiver slot (1–6), to a Logitech
+receiver. Otherwise it scans `/sys/class/hidraw` for a matching device and never falls
+back to an unrelated one. Once open, it asks the mouse where its HAPTIC feature lives
+instead of assuming an index.
 
 ### Available Waveforms
 
@@ -118,7 +115,7 @@ The daemon needs read/write access to `/dev/hidraw*`. The recommended approach i
 ls -la /dev/hidraw*
 
 # Create a udev rule (adjust idVendor/idProduct if needed)
-sudo tee /etc/udev/rules.d/99-mx4-haptic.rules << 'EOF'
+sudo tee /etc/udev/rules.d/99-mx4.rules << 'EOF'
 # Logitech MX Master 4 — allow user access for haptic feedback
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess"
 EOF
@@ -136,35 +133,22 @@ sudo setfacl -m u:$USER:rw /dev/hidrawN   # the node from "Finding Your Device"
 ## Architecture
 
 ```
-┌──────────────────────────────────────┐
-│  GNOME Shell extension               │
-│  (mx4-cursor-tracker@local)          │
-│                                      │
-│  pointer poll (50 ms), workspace,    │
-│  focus and window-size events        │
-│         │                            │
-│         │ D-Bus signals:             │
-│         │ BoundaryCrossed            │
-│         │ WorkspaceSwitched          │
-│         │ WindowSnapped              │
-│         │ FocusChanged               │
-└─────────┼────────────────────────────┘
-          ▼
-┌──────────────────────────────────────┐
-│  mx4-haptic-daemon                   │
-│                                      │
-│  Trigger per enabled config section  │◄── Notify calls on
-│  (throttle, then play waveform)      │    org.freedesktop.Notifications
-│                 │                    │
-│                 ▼                    │
-│          HapticSender                │
-│          /dev/hidraw ──► Mouse       │
-└──────────────────────────────────────┘
+GNOME Shell extension ──D-Bus signals──┐
+  (BoundaryCrossed, WorkspaceSwitched,  │
+   WindowSnapped, FocusChanged)         ▼
+                                 ┌──────────────────────────┐
+any app ──Notify()──▶ notifier   │ mx4d                     │
+          (watched as a monitor)─▶  haptic module (triggers)│
+                                 │        │                 │
+                                 │  mx4-core (Haptics,      │
+                                 │  Device) ──/dev/hidraw──▶ Mouse
+                                 └──────────────────────────┘
 ```
 
 ### Why not Solaar?
 
-Solaar's `solaar config <device> haptic-play <waveform>` works but takes ~1.5 seconds due to D-Bus IPC, Python object serialization, feature table negotiation, and response waiting. This daemon writes the 20-byte HID++ packet directly to `/dev/hidraw`, completing in under 1ms.
+Solaar's `solaar config <device> haptic-play <waveform>` takes about 1.5 seconds. `mx4d`
+writes the 20-byte HID++ packet straight to `/dev/hidraw` in under 1 ms.
 
 ### Why a GNOME extension?
 
@@ -173,17 +157,10 @@ On GNOME Wayland, there is no userspace API for cursor position tracking. XWayla
 ## Service Management
 
 ```bash
-# Status
-systemctl --user status mx4-haptic
-
-# Logs
-journalctl --user -u mx4-haptic -f
-
-# Restart after config change
-systemctl --user restart mx4-haptic
-
-# Disable
-systemctl --user disable --now mx4-haptic
+systemctl --user status mx4d          # status
+journalctl --user -u mx4d -f          # logs
+systemctl --user restart mx4d         # after a config change
+systemctl --user disable --now mx4d   # turn off
 gnome-extensions disable mx4-cursor-tracker@local
 ```
 
@@ -205,21 +182,14 @@ solaar show
 
 You only need this when the daemon logs that it cannot find the mouse.
 
-## Dependencies
-
-```bash
-# Ubuntu/Debian
-sudo apt install python3 python3-dbus python3-gi python3-yaml
-```
-
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v   # unit tests, no mouse or GNOME needed
-sudo tests/gnome-smoke/run.sh              # headless GNOME Shell end-to-end test (throwaway machine)
+cargo test                                         # unit tests, no mouse or GNOME needed
+cargo build --release && sudo tests/gnome-smoke/run.sh   # headless GNOME Shell end-to-end test (throwaway machine)
 ```
 
-CI runs both on every pull request.
+CI runs both, plus `cargo fmt --check` and `cargo clippy`, on every pull request.
 
 ## License
 

@@ -1,0 +1,34 @@
+# mx4d config. Keys you leave out keep these defaults.
+
+[device]
+path = "auto"          # or a fixed node such as "/dev/hidraw4"
+number = 0xFF          # 0xFF for Bluetooth direct, 1-6 for a Bolt receiver slot
+# feature_index = 11   # HAPTIC feature index; asked from the mouse when unset
+
+[haptic]
+enabled = true
+
+[haptic.display_boundary]   # cursor crosses to another monitor
+enabled = true
+waveform = "SUBTLE_COLLISION"
+cooldown_ms = 100
+
+[haptic.notifications]      # desktop notification arrives
+enabled = true
+waveform = "HAPPY_ALERT"
+cooldown_ms = 2000
+
+[haptic.workspace_switch]   # active workspace changes
+enabled = true
+waveform = "SUBTLE_COLLISION"
+cooldown_ms = 0
+
+[haptic.window_snap]        # window maximized or tiled left/right
+enabled = true
+waveform = "SUBTLE_COLLISION"
+cooldown_ms = 300
+
+[haptic.focus_change]       # another window takes focus
+enabled = true
+waveform = "SUBTLE_COLLISION"
+cooldown_ms = 300

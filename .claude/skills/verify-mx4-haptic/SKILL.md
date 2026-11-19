@@ -1,11 +1,11 @@
 ---
 name: verify-mx4-haptic
-description: Launch and drive mx4-haptic-daemon (the MX Master 4 haptic feedback daemon for GNOME/Linux) in an isolated sandbox and prove which HID++ haptic packets it sends for each trigger (monitor boundary, notification, workspace switch, window snap, focus change, --test). Use when you change the daemon, its config handling, or the D-Bus contract with the GNOME extension and need evidence it still behaves, without a mouse or a GNOME session.
+description: Launch and drive mx4d (the MX Master 4 daemon for GNOME/Linux) with its haptic module in an isolated sandbox and prove which HID++ haptic packets it sends for each trigger (monitor boundary, notification, workspace switch, window snap, focus change, --test). Use when you change the daemon, its config handling, or the D-Bus contract with the GNOME extension and need evidence it still behaves, without a mouse or a GNOME session.
 ---
 
 # Verify mx4-haptic
 
-The product is a Python daemon (`mx4-haptic-daemon`) plus a GNOME Shell extension (`gnome-extension/`). The user "touches" it through the mouse: an action on the desktop makes the mouse vibrate. Under the hood that is:
+The product is a Rust daemon (`mx4d`, built from `crates/`; the triggers live in `crates/mx4-haptic`) plus a GNOME Shell extension (`gnome-extension/`). The user "touches" it through the mouse: an action on the desktop makes the mouse vibrate. Under the hood that is:
 
 ```
 GNOME extension ──D-Bus signal──▶ daemon ──20-byte HID++ write──▶ /dev/hidrawN (mouse)
@@ -15,7 +15,7 @@ any app ──Notify() call──▶ notification server   (daemon eavesdrops th
 An agent has no mouse and usually no GNOME session, so this skill swaps both ends for stand-ins and keeps the daemon itself real, unmodified, started from this checkout:
 
 - **Signal source:** a private `dbus-daemon --session`. `gdbus emit` sends the exact signals the extension sends (same interface, path, argument types as `gnome-extension/extension.js`).
-- **Mouse:** a regular file. The daemon opens it as `device_path` and every haptic becomes 20 bytes appended to it, which the helper decodes.
+- **Mouse:** a regular file. The daemon opens it as `[device] path` and every haptic becomes 20 bytes appended to it, which the helper decodes.
 - **Notification server:** `scripts/fake-notifyd.py` owns `org.freedesktop.Notifications` on the private bus (verification scaffolding; gnome-shell owns it in production).
 
 Everything goes through one helper: `.claude/skills/verify-mx4-haptic/scripts/verify.sh`. Run it with no arguments for usage. Below, `V` means that path:
@@ -29,13 +29,13 @@ The feature recipes are in [`features/README.md`](features/README.md). Read it b
 ## Isolation and safety
 
 - Each `launch` gets its own bus, fake device, config and run dir under `/tmp/mx4-verify/<RUN_ID>/`. Parallel runs are safe; pick one with `MX4_RUN=<RUN_ID>` (default: the latest launch).
-- The run never touches the user's real session bus, their installed `~/.local/bin/mx4-haptic-daemon`, the `mx4-haptic` systemd user service, `~/.config/mx4-haptic/`, or any `/dev/hidraw*`.
+- The run never touches the user's real session bus, their installed `~/.local/bin/mx4d`, the `mx4d` systemd user service, `~/.config/mx4/`, or any `/dev/hidraw*`.
 - **Never point an automated run at a real `/dev/hidraw*`.** The daemon only writes to a node sysfs identifies as the MX Master 4 (or its receiver), but a real mouse would still vibrate and a misidentified node would still get packets. That is also why cleanup stops the daemon before deleting its fake device, and why doctor fails if any real hidraw is open.
 - Driving the real mouse is a human-in-the-loop check. See "Real hardware" below.
 
 ## Launch
 
-Requirements: `dbus-daemon`, `gdbus` (libglib2.0-bin) and a Python with `dbus-python`, `PyGObject`, `PyYAML`. On Ubuntu that is `apt install dbus python3-dbus python3-gi python3-yaml`. The helper picks the first of `python3`, `/usr/bin/python3`, `/usr/bin/python3.12` that imports all three; override with `MX4_PY=/path/to/python`. (In the Claude cloud container `python3` is a 3.13 without the dbus bindings and the helper falls back to `/usr/bin/python3.12`.)
+Requirements: `cargo`, `dbus-daemon`, `gdbus` (libglib2.0-bin) and a Python with `dbus-python` and `PyGObject` for the fake notification server and the packet decoder. On Ubuntu that is `apt install dbus python3-dbus python3-gi`. `launch` and `test-mode` run `cargo build --release` on this checkout first (or use `MX4_BIN=/path/to/mx4d`). The helper picks the first of `python3`, `/usr/bin/python3`, `/usr/bin/python3.12` that imports both; override with `MX4_PY=/path/to/python`. (In the Claude cloud container `python3` is a 3.13 without the dbus bindings and the helper falls back to `/usr/bin/python3.12`.)
 
 ```bash
 $V launch
@@ -43,7 +43,7 @@ $V launch
 # evidence: /root/mx4-verify-evidence/run-20261119-082704-773
 ```
 
-`launch` copies the repo's `config.yaml` (or `MX4_CONFIG=<file>` if set) with only `device_path` rewritten to the fake device, starts the bus, the fake notification server and the daemon (`--verbose`), and returns once the daemon log has `mx4-haptic-daemon started (device=…)` and the notification server printed `fake-notifyd ready`. Both must be true: the start line alone does not mean notifications can be delivered. If it exits non-zero, read the printed log and run `$V cleanup`.
+`launch` copies the repo's `config.toml` (or `MX4_CONFIG=<file>` if set) with only the `path = ` line under `[device]` rewritten to the fake device, starts the bus, the fake notification server and the daemon (`--verbose`), and returns once the daemon log has `mx4d started (device=…)` and the notification server printed `fake-notifyd ready`. Both must be true: the start line alone does not mean notifications can be delivered. If it exits non-zero, read the printed log and run `$V cleanup`.
 
 There is no data dir or migration; an empty run dir is the starting state. Teardown is `$V cleanup`.
 
@@ -69,14 +69,14 @@ $V focus NAME                # FocusChanged(s)             log: "FocusChanged: N
 $V notify SUMMARY            # Notify() to org.freedesktop.Notifications   log: "Notify: SUMMARY"
 ```
 
-Options for every trigger: `--repeat N` fires N events back to back (about 20 ms apart), `--expect K` asserts exactly K new packets (default 1, `0` asserts suppression). Use them for debounce and cooldown:
+Options for every trigger: `--repeat N` fires N events back to back (about 20 ms apart), `--expect K` asserts exactly K new packets (default 1, `0` asserts suppression). Use them for cooldowns:
 
 ```bash
-$V boundary 0 1 1920 540 --repeat 2 --expect 1   # 100 ms debounce swallows the second
+$V boundary 0 1 1920 540 --repeat 2 --expect 1   # 100 ms cooldown swallows the second
 $V notify "Second" --expect 0                     # within 2 s cooldown of the previous notify
 ```
 
-`$V test-mode` runs `mx4-haptic-daemon --test` against its own fresh fake device (no bus needed, about 24 s) and decodes all 16 waveforms.
+`$V test-mode` runs `mx4d --test` against its own fresh fake device (no bus needed, about 24 s) and decodes all 16 waveforms.
 
 A decoded packet looks like:
 
@@ -95,7 +95,7 @@ Evidence lives outside the scratch dir and survives cleanup: `${MX4_VERIFY_EVIDE
 | `daemon.log` | launch (live) | which events the daemon received and what it decided |
 | `notifyd.log` | fake-notifyd (live) | the Notify call really reached a server and got an id |
 | `packets-<label>.txt`, `fake-hidraw-<label>.bin` | `$V evidence <label>` | the exact bytes that would have gone to the mouse, decoded and raw |
-| `packets-final.txt`, `fake-hidraw-final.bin`, `config.yaml` | cleanup | full packet history and the config actually used |
+| `packets-final.txt`, `fake-hidraw-final.bin`, `config.toml` | cleanup | full packet history and the config actually used |
 | `INDEX` | `$V evidence` | run id, git revision, label, timestamp per snapshot |
 | `test-mode.out`, `packets-test-mode.txt` | `$V test-mode` (dir `test-<ts>`) | `--test` output, exit code and all 16 packets |
 
@@ -104,7 +104,7 @@ Proof standards:
 - Drive through the real interface: emit the D-Bus signal or make the Notify call. Never import the daemon and call `HapticSender.play()` or a detector's `_on_*` method; that skips the D-Bus wiring, which is the thing most likely to break.
 - Capture the action and the result: the trigger output (log line + decoded packet) for each step, then `$V evidence <label>` at the end of the journey.
 - The side effect is the packet bytes, not the log line. A log line with no packet (or a packet with the wrong waveform byte) is a failure.
-- For "should not fire" behavior (debounce, cooldown, `enabled: false`), assert `--expect 0`, not just the absence of a log line.
+- For "should not fire" behavior (cooldown, `enabled = false`), assert `--expect 0`, not just the absence of a log line.
 - The stand-ins sit at real boundaries (D-Bus and the device file), so the daemon code under test is unchanged. What this harness does not prove: that the extension emits these signals inside gnome-shell, that the mouse accepts the packet, and that the user's real session bus delivers eavesdropped Notify calls. Say so in any report.
 
 ## Cleanup
@@ -120,9 +120,9 @@ It snapshots the final packets and config into the evidence dir, stops the daemo
 
 Only with the user present, on their Ubuntu/GNOME 46 machine with the mouse connected, and only when they ask. The installed service and the real device are theirs; do not start a second daemon against the same device.
 
-- Doctor: `systemctl --user is-active mx4-haptic`, `journalctl --user -u mx4-haptic -n 30`, `gnome-extensions info mx4-cursor-tracker@local` (State: ACTIVE), and `gdbus call --session --dest org.gnome.Shell --object-path /com/mx4haptic/CursorTracker --method com.mx4haptic.CursorTracker.GetPosition` (returns `(x, y, monitor)`). Find the mouse with the loop in README "Finding Your Device".
-- Watch the extension's signals while the user moves the cursor across monitors, switches workspace, snaps a window, or changes focus: `dbus-monitor --session "type='signal',interface='com.mx4haptic.CursorTracker'"`, alongside `journalctl --user -u mx4-haptic -f`.
-- Waveforms on the real mouse: `mx4-haptic-daemon --test` (the user confirms they feel 16 pulses; the output must show 16 `OK`).
+- Doctor: `systemctl --user is-active mx4d`, `journalctl --user -u mx4d -n 30`, `gnome-extensions info mx4-cursor-tracker@local` (State: ACTIVE), and `gdbus call --session --dest org.gnome.Shell --object-path /com/mx4haptic/CursorTracker --method com.mx4haptic.CursorTracker.GetPosition` (returns `(x, y, monitor)`). Find the mouse with the loop in README "Finding Your Device".
+- Watch the extension's signals while the user moves the cursor across monitors, switches workspace, snaps a window, or changes focus: `dbus-monitor --session "type='signal',interface='com.mx4haptic.CursorTracker'"`, alongside `journalctl --user -u mx4d -f`.
+- Waveforms on the real mouse: `mx4d --test` (the user confirms they feel 16 pulses; the output must show 16 `OK`).
 
 ## Helpers
 

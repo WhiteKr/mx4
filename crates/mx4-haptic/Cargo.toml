@@ -1,0 +1,15 @@
+[package]
+name = "mx4-haptic"
+description = "Haptic triggers: monitor boundary, workspace, window snap, focus, notifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mx4-core.workspace = true
+anyhow.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+tracing.workspace = true
+zbus.workspace = true
+

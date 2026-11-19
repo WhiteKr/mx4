@@ -1,11 +1,11 @@
 # Workspace switch
 
-Each time the user switches GNOME workspace, the mouse gives a light bump. There is no debounce: every switch buzzes.
+Each time the user switches GNOME workspace, the mouse gives a light bump. Its cooldown is 0: every switch buzzes.
 
 ## Sub-features
 
 - `ws-fire` a switch sends one `SUBTLE_COLLISION` (0x04) packet.
-- `ws-no-debounce` N quick switches send N packets.
+- `ws-no-cooldown` N quick switches send N packets.
 
 ## How to get to it (user POV)
 
@@ -23,5 +23,5 @@ Preconditions:
 
 ## Gotchas
 
-- `workspace_switch` has no debounce key in the shipped config. Adding `debounce_ms` or `cooldown_s` to it enables throttling like any other trigger; then update this file and the `--expect` count.
+- `haptic.workspace_switch.cooldown_ms` is 0 in the shipped config. Raising it enables throttling like any other trigger; then update this file and the `--expect` count.
 - The extension only emits when the index actually changes; the harness can emit `0 0` and the daemon will still buzz. That is a harness artifact, not a daemon bug.

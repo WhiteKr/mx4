@@ -65,8 +65,8 @@ done
 
 DEV=$W/fake-hidraw
 : >"$DEV"
-printf 'device_path: %s\n' "$DEV" >"$W/config.yaml"
-python3 "$REPO/mx4-haptic-daemon" --config "$W/config.yaml" >"$W/daemon.log" 2>&1 &
+printf '[device]\npath = "%s"\n' "$DEV" >"$W/config.toml"
+"${MX4D:-$REPO/target/release/mx4d}" --config "$W/config.toml" >"$W/daemon.log" 2>&1 &
 python3 "$HERE/notifyd.py" &
 sleep 2
 
